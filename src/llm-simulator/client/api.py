@@ -1,45 +1,53 @@
-import json
 import time
 import uuid
-from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 
-MODEL_NAME = "qwen-mock"
-
-
-class ChatMessage(BaseModel):
-    role: str
-    content: str
-
-
-class ChatCompletionRequest(BaseModel):
-    model: str = MODEL_NAME
-    messages: List[ChatMessage]
-    stream: bool = False
-    max_tokens: Optional[int] = None
+from exception import OpenAIError, register_exception_handlers
+from models import (
+    MODEL_NAME,
+    ChatCompletionChunk,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatMessage,
+    Choice,
+    ChunkChoice,
+    Delta,
+    ErrorResponse,
+    ModelCard,
+    ModelList,
+    Usage,
+)
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="LLM Simulator", version="0.1.0")
+    app = FastAPI(
+        title="LLM Simulator",
+        version="0.1.0",
+        responses={
+            status: {"model": ErrorResponse} for status in (400, 404, 405, 500)
+        },
+    )
+    register_exception_handlers(app)
 
     @app.get("/health")
     async def health():
         return {"status": "ok"}
 
-    @app.get("/v1/models")
+    @app.get("/v1/models", response_model=ModelList)
     async def list_models():
-        return {
-            "object": "list",
-            "data": [{"id": MODEL_NAME, "object": "model", "owned_by": "llm-simulator"}],
-        }
+        return ModelList(data=[ModelCard(id=MODEL_NAME)])
 
-    @app.post("/v1/chat/completions")
+    @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
     async def chat_completions(body: ChatCompletionRequest):
-        if not body.messages:
-            raise HTTPException(status_code=400, detail="'messages' must not be empty")
+        if body.model != MODEL_NAME:
+            raise OpenAIError(
+                404,
+                f"The model `{body.model}` does not exist or you do not have access to it.",
+                param="model",
+                code="model_not_found",
+            )
 
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
@@ -53,54 +61,41 @@ def create_app() -> FastAPI:
                 media_type="text/event-stream",
             )
 
-        return {
-            "id": completion_id,
-            "object": "chat.completion",
-            "created": created,
-            "model": body.model,
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": "".join(tokens)},
-                    "finish_reason": "stop",
-                }
+        return ChatCompletionResponse(
+            id=completion_id,
+            created=created,
+            model=body.model,
+            choices=[
+                Choice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content="".join(tokens)),
+                    finish_reason="stop",
+                )
             ],
-            "usage": {
-                "prompt_tokens": 0,
-                "completion_tokens": len(tokens),
-                "total_tokens": len(tokens),
-            },
-        }
-
-    @app.exception_handler(HTTPException)
-    async def http_exception_handler(_: Request, exc: HTTPException):
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"error": {"message": exc.detail, "code": exc.status_code}},
+            usage=Usage(
+                prompt_tokens=0,
+                completion_tokens=len(tokens),
+                total_tokens=len(tokens),
+            ),
         )
 
     return app
 
 
 async def _stream_chunks(completion_id, created, model, tokens):
-    for token in tokens:
-        chunk = {
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{"index": 0, "delta": {"content": token}, "finish_reason": None}],
-        }
-        yield f"data: {json.dumps(chunk)}\n\n"
+    def chunk(delta: Delta, finish_reason=None) -> str:
+        payload = ChatCompletionChunk(
+            id=completion_id,
+            created=created,
+            model=model,
+            choices=[ChunkChoice(index=0, delta=delta, finish_reason=finish_reason)],
+        )
+        return f"data: {payload.model_dump_json()}\n\n"
 
-    final = {
-        "id": completion_id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-    }
-    yield f"data: {json.dumps(final)}\n\n"
+    for token in tokens:
+        yield chunk(Delta(content=token))
+
+    yield chunk(Delta(), finish_reason="stop")
     yield "data: [DONE]\n\n"
 
 
