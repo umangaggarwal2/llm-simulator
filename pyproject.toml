@@ -1,0 +1,30 @@
+[tool.poetry]
+name = "llm-simulator"
+description = "A deterministic fake LLM that streams tokens through OpenAI compatible API, provides custom GPU configurations and simulates metrics."
+authors = ["Umang Aggarwal <umangaggarwal2@github.com>"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/umangaggarwal2/llm-simulator"
+homepage = "https://github.com/umangaggarwal2/llm-simulator"
+keywords = ["llm", "openai", "performance", "gpu", "simulator", "testing", "mock", "deterministic"]
+packages = [
+    { include = "llm-simulator", from = "src" }
+]
+
+[tool.poetry.dependencies]
+python = ">=3.10"
+fastapi = ">=0.68.0"
+uvicorn = ">=0.15.0"
+pyyaml = ">=5.4.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 88
+target-version = ["py38"]
+include = '\.pyi?$'
+
+[tool.poetry.scripts]
+llmsimulator = ""
