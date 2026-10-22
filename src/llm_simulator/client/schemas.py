@@ -1,10 +1,8 @@
+"""Request and response bodies of the OpenAI-compatible HTTP API."""
+
 from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_serializer
-
-# TODO: load from the YAML config once it exists.
-MODEL_NAME = "qwen-mock"
-
 
 # --- Request models ---
 
@@ -14,11 +12,23 @@ class ChatMessage(BaseModel):
     content: str
 
 
+class StreamOptions(BaseModel):
+    # OpenAI documents stream_options as "only set this when you set stream: true";
+    # it is ignored for non-streaming requests.
+    include_usage: bool = False
+
+
 class ChatCompletionRequest(BaseModel):
-    model: str = MODEL_NAME
+    # Fields OpenAI accepts that the simulator does not use (temperature, top_p,
+    # tools, ...) are accepted and ignored, so existing clients keep working.
+    model: str
     messages: List[ChatMessage] = Field(min_length=1)
     stream: bool = False
+    stream_options: Optional[StreamOptions] = None
+    # Deprecated by OpenAI in favour of max_completion_tokens, which wins if both are set.
     max_tokens: Optional[int] = Field(default=None, ge=1)
+    max_completion_tokens: Optional[int] = Field(default=None, ge=1)
+    seed: Optional[int] = None
 
 
 # --- Response models ---
@@ -27,6 +37,7 @@ class ChatCompletionRequest(BaseModel):
 class ModelCard(BaseModel):
     id: str
     object: Literal["model"] = "model"
+    created: int
     owned_by: str = "llm-simulator"
 
 
@@ -78,6 +89,9 @@ class ChatCompletionChunk(BaseModel):
     created: int
     model: str
     choices: List[ChunkChoice]
+    # Only serialized when stream_options.include_usage is set: null on every
+    # chunk except the last, which carries the totals.
+    usage: Optional[Usage] = None
 
 
 # --- Error models ---

@@ -5,7 +5,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from models import ErrorDetail, ErrorResponse
+from llm_simulator.client.schemas import ErrorDetail, ErrorResponse
+from llm_simulator.errors import ContextLengthExceeded
 
 
 class OpenAIError(Exception):
@@ -29,6 +30,7 @@ class OpenAIError(Exception):
 
 def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(OpenAIError, openai_exception_handler)
+    app.add_exception_handler(ContextLengthExceeded, context_length_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     # Starlette's HTTPException also covers routing errors (404, 405) and
     # FastAPI's HTTPException, which subclasses it.
@@ -38,6 +40,10 @@ def register_exception_handlers(app: FastAPI) -> None:
 
 async def openai_exception_handler(_: Request, exc: OpenAIError):
     return openai_error(exc.status, exc.message, exc.type, exc.param, exc.code)
+
+
+async def context_length_handler(_: Request, exc: ContextLengthExceeded):
+    return openai_error(400, str(exc), param="messages", code="context_length_exceeded")
 
 
 async def validation_exception_handler(_: Request, exc: RequestValidationError):

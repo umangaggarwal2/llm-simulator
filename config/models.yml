@@ -1,0 +1,30 @@
+# Models the simulator serves. Clients select one with the request's `model` field.
+# Each model gets its own simulated GPU of the hardware profile it references.
+version: 1
+
+hardware:
+  h100-80gb:
+    hbm_gb: 80
+    memory_bandwidth_gbps: 3000
+
+models:
+  - name: qwen-mock
+    context_length: 32768
+    tokenizer: regex
+    # instant: tokens are sent immediately. Timed engines come later and will
+    # use the sections below.
+    engine: instant
+    hardware: h100-80gb
+    kv_cache:
+      bytes_per_token: 524288
+    performance:
+      prefill_tokens_per_second: 100000
+      decode_tokens_per_second: 250
+    scheduler:
+      max_batch_tokens: 8192
+      max_num_sequences: 64
+    latency:
+      scheduler_overhead_ms: 2
+
+  - name: tiny-mock
+    context_length: 8192

@@ -1,30 +1,47 @@
-[tool.poetry]
+[project]
 name = "llm-simulator"
+version = "0.1.0"
 description = "A deterministic fake LLM that streams tokens through OpenAI compatible API, provides custom GPU configurations and simulates metrics."
-authors = ["Umang Aggarwal <umangaggarwal2@github.com>"]
+authors = [{name="Umang Aggarwal", email="umangaggarwal2@github.com"}]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/umangaggarwal2/llm-simulator"
-homepage = "https://github.com/umangaggarwal2/llm-simulator"
 keywords = ["llm", "openai", "performance", "gpu", "simulator", "testing", "mock", "deterministic"]
-packages = [
-    { include = "llm-simulator", from = "src" }
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.100.0",
+    "pydantic>=2.1,<3",
+    "uvicorn>=0.15.0",
+    "pyyaml>=5.4.1"
 ]
 
-[tool.poetry.dependencies]
-python = ">=3.10"
-fastapi = ">=0.68.0"
-uvicorn = ">=0.15.0"
-pyyaml = ">=5.4.1"
+[project.urls]
+repository = "https://github.com/umangaggarwal2/llm-simulator"
+homepage = "https://github.com/umangaggarwal2/llm-simulator"
+
+[project.scripts]
+llmsimulator = "llm_simulator.client.api:main"
+
+[tool.poetry]
+packages = [
+    { include = "llm_simulator", from = "src" }
+]
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=9.0,<10"
+black = ">=26.1,<27"
+httpx2 = ">=2.14,<3"
+openai = ">=3.0,<4"
 
 [build-system]
-requires = ["poetry-core"]
+requires = ["poetry-core>=2.0,<3"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.black]
 line-length = 88
-target-version = ["py38"]
-include = '\.pyi?$'
+target-version = ["py310"]
 
-[tool.poetry.scripts]
-llmsimulator = ""
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+markers = [
+    "integration: runs a real server and talks to it over HTTP (deselect with -m 'not integration')",
+]
