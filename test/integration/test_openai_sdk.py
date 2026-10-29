@@ -9,11 +9,13 @@ import socket
 import threading
 import time
 
+import httpx2
 import openai
 import pytest
 import uvicorn
 import yaml
 from openai import AsyncOpenAI, OpenAI
+from prometheus_client.parser import text_string_to_metric_families
 
 from llm_simulator.client.api import create_app
 from llm_simulator.llm.tokenizer import RegexTokenizer
@@ -27,6 +29,17 @@ MODELS = {
     "models": [
         {"name": "big-mock", "context_length": 1000},
         {"name": "small-mock", "context_length": 40},
+        {
+            # 20 ms overhead, prefill at 1000 tok/s, then one token every 10 ms.
+            "name": "paced-mock",
+            "context_length": 1000,
+            "engine": "fixed_rate",
+            "performance": {
+                "prefill_tokens_per_second": 1000,
+                "decode_tokens_per_second": 100,
+            },
+            "latency": {"scheduler_overhead_ms": 20},
+        },
     ],
 }
 RESPONSES = {
@@ -101,7 +114,7 @@ def prompt_tokens(*messages):
 
 def test_list_models(client):
     models = client.models.list()
-    assert [model.id for model in models] == ["big-mock", "small-mock"]
+    assert [model.id for model in models] == ["big-mock", "small-mock", "paced-mock"]
     assert all(model.object == "model" for model in models)
 
 
@@ -224,3 +237,195 @@ def test_context_length_exceeded_when_streaming(client):
             model="small-mock", messages=user("hello"), max_tokens=100, stream=True
         )
     assert error.value.code == "context_length_exceeded"
+
+
+# --- Pacing (fixed_rate engine) ---
+
+# Measured from the client, so these bounds include HTTP and SDK overhead.
+TOLERANCE = 0.05
+
+
+def paced_timeline():
+    prompt = prompt_tokens(*user("anything"))
+    ttft = 0.020 + prompt / 1000
+    # The default response is 8 tokens: TTFT, then 7 more 10 ms apart.
+    return ttft, ttft + 7 * 0.010
+
+
+def test_streaming_is_paced(client):
+    ttft, e2e = paced_timeline()
+    start = time.monotonic()
+    stream = client.chat.completions.create(
+        model="paced-mock", messages=user("anything"), stream=True
+    )
+    first_token = None
+    text = ""
+    for chunk in stream:
+        content = chunk.choices[0].delta.content
+        if content and first_token is None:
+            first_token = time.monotonic() - start
+        text += content or ""
+    total = time.monotonic() - start
+
+    assert text == "one two three four five six seven eight"
+    assert ttft <= first_token < ttft + TOLERANCE
+    assert e2e <= total < e2e + TOLERANCE
+
+
+def test_non_streaming_waits_for_the_whole_timeline(client):
+    _, e2e = paced_timeline()
+    start = time.monotonic()
+    response = client.chat.completions.create(
+        model="paced-mock", messages=user("anything")
+    )
+    total = time.monotonic() - start
+
+    assert (
+        response.choices[0].message.content == "one two three four five six seven eight"
+    )
+    assert e2e <= total < e2e + TOLERANCE
+
+
+# --- Content parts ---
+
+
+def test_text_content_parts(client):
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "hel"},
+                {"type": "text", "text": "lo"},
+            ],
+        }
+    ]
+    response = client.chat.completions.create(model="big-mock", messages=messages)
+    assert response.choices[0].message.content == "Hello from big-mock!"
+    assert response.usage.prompt_tokens == prompt_tokens(
+        {"role": "user", "content": "hello"}
+    )
+
+
+def test_text_content_parts_streaming(client):
+    messages = [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+    stream = client.chat.completions.create(
+        model="big-mock", messages=messages, stream=True
+    )
+    text = "".join(
+        chunk.choices[0].delta.content or "" for chunk in stream if chunk.choices
+    )
+    assert text == "Hello from big-mock!"
+
+
+def test_image_content_part_is_rejected(client):
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "What is this?"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "https://example.com/a.png"},
+                },
+            ],
+        }
+    ]
+    with pytest.raises(openai.BadRequestError) as error:
+        client.chat.completions.create(model="big-mock", messages=messages)
+    assert error.value.status_code == 400
+    assert error.value.param == "messages.[0].content.[1].type"
+
+
+# --- Metrics ---
+# The server is shared by the whole module, so these compare before and after.
+
+
+def scrape(base_url):
+    text = httpx2.get(base_url.removesuffix("/v1") + "/metrics").text
+    return {
+        (sample.name, tuple(sorted(sample.labels.items()))): sample.value
+        for family in text_string_to_metric_families(text)
+        for sample in family.samples
+    }
+
+
+def metric(samples, name, **labels):
+    return samples.get((name, tuple(sorted(labels.items()))), 0.0)
+
+
+def test_client_disconnect_is_counted_as_cancelled(client, base_url):
+    labels = {"model": "paced-mock"}
+    before = scrape(base_url)
+
+    stream = client.chat.completions.create(
+        model="paced-mock", messages=user("anything"), stream=True
+    )
+    chunks = iter(stream)
+    next(chunks)  # role chunk
+    next(chunks)  # first token
+    stream.close()  # the client goes away with tokens still to come
+
+    deadline = time.monotonic() + 5
+    while True:
+        after = scrape(base_url)
+        cancelled = metric(
+            after, "llm_sim_requests_total", finish_reason="cancelled", **labels
+        ) - metric(
+            before, "llm_sim_requests_total", finish_reason="cancelled", **labels
+        )
+        if cancelled or time.monotonic() > deadline:
+            break
+        time.sleep(0.02)
+
+    assert cancelled == 1
+    assert metric(after, "llm_sim_requests_running", **labels) == 0
+    # Its E2E is left out; its first token is not.
+    assert metric(
+        after, "llm_sim_e2e_request_latency_seconds_count", **labels
+    ) == metric(before, "llm_sim_e2e_request_latency_seconds_count", **labels)
+    assert (
+        metric(after, "llm_sim_time_to_first_token_seconds_count", **labels)
+        == metric(before, "llm_sim_time_to_first_token_seconds_count", **labels) + 1
+    )
+
+
+def test_server_ttft_matches_the_configured_timeline(client, base_url):
+    labels = {"model": "paced-mock"}
+    ttft, e2e = paced_timeline()
+    before = scrape(base_url)
+    client.chat.completions.create(model="paced-mock", messages=user("anything"))
+    after = scrape(base_url)
+
+    def delta(name):
+        return metric(after, name, **labels) - metric(before, name, **labels)
+
+    assert delta("llm_sim_time_to_first_token_seconds_count") == 1
+    # Server-observed = simulated + lag: a few milliseconds at most here.
+    assert ttft <= delta("llm_sim_time_to_first_token_seconds_sum") < ttft + 0.02
+    assert e2e <= delta("llm_sim_e2e_request_latency_seconds_sum") < e2e + 0.02
+    assert delta("llm_sim_token_lag_seconds_count") == 8
+    assert delta("llm_sim_token_lag_seconds_sum") < 8 * 0.005
+
+
+def summary(base_url):
+    return httpx2.get(base_url.removesuffix("/v1") + "/metrics/summary").json()
+
+
+def test_summary_ttft_matches_the_configured_timeline(client, base_url):
+    # Reset while nothing is in flight, so the period holds just this request.
+    httpx2.post(base_url.removesuffix("/v1") + "/metrics/summary/reset")
+    ttft, e2e = paced_timeline()
+    client.chat.completions.create(model="paced-mock", messages=user("anything"))
+
+    model = summary(base_url)["models"]["paced-mock"]
+    latency = model["latency_seconds"]
+    assert latency["ttft"]["count"] == 1
+    assert ttft <= latency["ttft"]["p50"] < ttft + 0.02
+    assert e2e <= latency["e2e"]["p50"] < e2e + 0.02
+    # One token every 10 ms after the first. Deadlines are anchored to
+    # arrival, so a late first token makes the next gaps shorter, not later:
+    # TPOT can land slightly under 10 ms as well as over.
+    assert latency["itl"]["count"] == 7
+    assert latency["tpot"]["p50"] == pytest.approx(0.010, abs=0.003)
+    assert latency["lag"]["max"] < 0.005
+    assert model["throughput"]["output_tokens_per_second"] > 0

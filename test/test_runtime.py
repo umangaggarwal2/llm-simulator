@@ -3,9 +3,9 @@ import pytest
 from llm_simulator.llm.models import ModelsConfig, ModelsConfigError
 from llm_simulator.llm.responses import ResponsesConfig
 from llm_simulator.llm.tokenizer import RegexTokenizer
-from llm_simulator.runtime import build_runtimes
-from llm_simulator.simulator import engine as engine_module
-from llm_simulator.simulator.engine import InstantEngine
+from llm_simulator import runtime as runtime_module
+from llm_simulator.runtime import EngineBuilder, build_runtimes
+from llm_simulator.simulator import FixedRateEngine, InstantEngine
 from llm_simulator.types import GenerationRequest, Message
 
 RESPONSES = ResponsesConfig.model_validate(
@@ -67,12 +67,76 @@ def test_engine_required_sections_are_enforced(monkeypatch):
         name = "needs_performance"
         required_sections = ("performance", "latency")
 
-    monkeypatch.setitem(engine_module._ENGINES, NeedsPerformance.name, NeedsPerformance)
+    monkeypatch.setitem(
+        runtime_module.ENGINES,
+        NeedsPerformance.name,
+        EngineBuilder(NeedsPerformance, lambda deployment: NeedsPerformance()),
+    )
     with pytest.raises(
         ModelsConfigError,
         match="engine 'needs_performance' requires section\\(s\\) performance, latency",
     ):
         build_runtimes(
             models({"name": "m", "context_length": 10, "engine": "needs_performance"}),
+            RESPONSES,
+        )
+
+
+def test_unknown_engine_lists_available_engines():
+    with pytest.raises(ModelsConfigError, match="available: fixed_rate, instant"):
+        build_runtimes(
+            models({"name": "m", "context_length": 10, "engine": "warp"}), RESPONSES
+        )
+
+
+def test_instant_is_the_default_engine():
+    runtimes = build_runtimes(models({"name": "m", "context_length": 10}), RESPONSES)
+    assert isinstance(runtimes["m"].engine, InstantEngine)
+
+
+PERFORMANCE = {"prefill_tokens_per_second": 1000, "decode_tokens_per_second": 50}
+
+
+def test_fixed_rate_engine_gets_its_parameters_from_the_config():
+    runtimes = build_runtimes(
+        models(
+            {
+                "name": "m",
+                "context_length": 10,
+                "engine": "fixed_rate",
+                "performance": PERFORMANCE,
+                "latency": {"scheduler_overhead_ms": 5},
+            }
+        ),
+        RESPONSES,
+    )
+    engine = runtimes["m"].engine
+    assert isinstance(engine, FixedRateEngine)
+    # 5 ms overhead + 100 prompt tokens at 1000 tok/s.
+    assert engine.ttft(100) == pytest.approx(0.105)
+
+
+def test_fixed_rate_latency_section_is_optional():
+    runtimes = build_runtimes(
+        models(
+            {
+                "name": "m",
+                "context_length": 10,
+                "engine": "fixed_rate",
+                "performance": PERFORMANCE,
+            }
+        ),
+        RESPONSES,
+    )
+    assert runtimes["m"].engine.ttft(100) == pytest.approx(0.1)
+
+
+def test_fixed_rate_requires_performance():
+    with pytest.raises(
+        ModelsConfigError,
+        match="model 'm': engine 'fixed_rate' requires section\\(s\\) performance",
+    ):
+        build_runtimes(
+            models({"name": "m", "context_length": 10, "engine": "fixed_rate"}),
             RESPONSES,
         )

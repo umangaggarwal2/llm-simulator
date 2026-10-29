@@ -1,4 +1,8 @@
-"""Engines decide when each token of a generation plan is emitted."""
+"""The engine interface: engines decide when each token of a plan is emitted.
+
+Implementations live in their own modules (instant.py, fixed_rate.py, ...).
+This module never imports them; choosing one by name is runtime.py's job.
+"""
 
 from abc import ABC, abstractmethod
 from typing import AsyncIterator, ClassVar, Tuple
@@ -32,33 +36,3 @@ class Engine(ABC):
 
     async def stop(self) -> None:
         """Called once when the app shuts down."""
-
-
-class InstantEngine(Engine):
-    """Emits every token immediately, with no simulated latency.
-
-    Used to serve responses before any timing model exists, and for tests that
-    check content rather than timing.
-    """
-
-    name = "instant"
-
-    async def run(
-        self, plan: GenerationPlan, arrival: float
-    ) -> AsyncIterator[TokenEvent]:
-        # No sleep between tokens: when streaming, each SSE write already
-        # yields to the event loop.
-        for index, text in enumerate(plan.tokens):
-            yield TokenEvent(index, text, sim_time=0.0)
-
-
-_ENGINES = {InstantEngine.name: InstantEngine}
-
-
-def get_engine(name: str) -> Engine:
-    """Build an engine by its config name, e.g. "instant"."""
-    try:
-        return _ENGINES[name]()
-    except KeyError:
-        available = ", ".join(sorted(_ENGINES))
-        raise ValueError(f"unknown engine '{name}'; available: {available}") from None

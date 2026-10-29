@@ -1,15 +1,32 @@
-"""FastAPI dependencies that give handlers access to the per-model runtimes."""
+"""FastAPI dependencies that give handlers the components built at startup.
+
+Tests can replace any of them through app.dependency_overrides.
+"""
 
 from fastapi import Request
 
 from llm_simulator.client.exception import OpenAIError
+from llm_simulator.metrics import MetricsRecorder, PrometheusRecorder, SummaryRecorder
 from llm_simulator.runtime import ModelRuntime, Runtimes
 
 
 def get_runtimes(request: Request) -> Runtimes:
-    """The runtimes built at startup. Tests can replace them through
-    app.dependency_overrides[get_runtimes]."""
     return request.app.state.runtimes
+
+
+def get_recorder(request: Request) -> MetricsRecorder:
+    """Where request traces report their measurements."""
+    return request.app.state.recorder
+
+
+def get_prometheus(request: Request) -> PrometheusRecorder:
+    """The store GET /metrics exposes."""
+    return request.app.state.prometheus
+
+
+def get_summary(request: Request) -> SummaryRecorder:
+    """The store GET /metrics/summary reads."""
+    return request.app.state.summary
 
 
 def find_runtime(runtimes: Runtimes, model: str) -> ModelRuntime:

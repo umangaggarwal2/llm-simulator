@@ -2,14 +2,41 @@
 
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_serializer
+from pydantic import BaseModel, Field, field_serializer, field_validator
+from pydantic_core import PydanticCustomError
 
 # --- Request models ---
 
 
-class ChatMessage(BaseModel):
+class ContentPart(BaseModel):
+    # Every part type OpenAI defines is valid here; which ones the simulator
+    # can serve is decided when the request is converted (convert.py).
+    type: Literal["text", "image_url", "input_audio", "file", "refusal"]
+    # Required for text parts; checked in convert.py, which reports it as
+    # OpenAI does.
+    text: Optional[str] = None
+
+
+class ChatMessageParam(BaseModel):
+    """A message in a request; content may be a string or a list of parts."""
+
     role: str
-    content: str
+    content: List[ContentPart] = Field(min_length=1)
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _string_is_one_text_part(cls, value):
+        # "hi" and [{"type": "text", "text": "hi"}] are the same message.
+        # Converting here, rather than typing content as str | list, keeps
+        # validation errors at paths like messages.[0].content.[1].type
+        # instead of one error per union member.
+        if isinstance(value, str):
+            return [{"type": "text", "text": value}]
+        if not isinstance(value, list):
+            raise PydanticCustomError(
+                "content_type", "Input should be a string or an array of content parts"
+            )
+        return value
 
 
 class StreamOptions(BaseModel):
@@ -22,7 +49,7 @@ class ChatCompletionRequest(BaseModel):
     # Fields OpenAI accepts that the simulator does not use (temperature, top_p,
     # tools, ...) are accepted and ignored, so existing clients keep working.
     model: str
-    messages: List[ChatMessage] = Field(min_length=1)
+    messages: List[ChatMessageParam] = Field(min_length=1)
     stream: bool = False
     stream_options: Optional[StreamOptions] = None
     # Deprecated by OpenAI in favour of max_completion_tokens, which wins if both are set.
@@ -50,6 +77,13 @@ class Usage(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+
+
+class ChatMessage(BaseModel):
+    """A message in a response; its content is always a string."""
+
+    role: str
+    content: str
 
 
 class Choice(BaseModel):

@@ -19,8 +19,13 @@ Keeping them apart lets the response content stay simple and deterministic while
 | Matcher | `llm/matcher.py` | Done |
 | Shared types and domain errors | `types.py`, `errors.py` | Done |
 | Generator | `llm/generator.py` | Done |
-| Engine interface and `InstantEngine` | `simulator/engine.py` | Done |
-| `FixedRateEngine`, `SchedulerEngine` | `simulator/engine.py` | Planned |
+| Engine interface | `simulator/engine.py` | Done |
+| `InstantEngine` | `simulator/instant.py` | Done |
+| `FixedRateEngine` | `simulator/fixed_rate.py`, `simulator/_timing.py` | Done |
+| Metrics: tracing, recorder, `/metrics` | `metrics/`, `client/api.py` | Done |
+| Metrics: `/metrics/summary` with sample windows | `metrics/summary.py`, `metrics/window.py` | Done |
+| Load generator | `bench/` | Planned |
+| `SchedulerEngine` | `simulator/scheduler/` | Planned |
 
 ## Layers and dependencies
 
@@ -33,7 +38,7 @@ client ──▶ runtime.py ──▶ llm        ──┐
 - `client` handles HTTP only: it converts API models to domain types and domain events back into OpenAI responses.
 - `llm` decides the response content. It never deals with time.
 - `simulator` decides when tokens are emitted. It never deals with response content.
-- `runtime.py` is the one module that assembles every layer. It reads the parsed `models.yml` and `responses.yml` and hands the generator and engine only the values they need.
+- `runtime.py` is the composition root: the one module that assembles every layer, much like a Spring application context but with explicit construction. It reads the parsed `models.yml` and `responses.yml` and passes the generator and each engine plain parameters, so components never depend on configuration classes. The app builds it once at startup (singleton scope), handlers receive it through `Depends(get_runtimes)`, and the lifespan calls each engine's `start` and `stop`.
 - `llm/models.py` holds the `models.yml` schema, including the hardware and serving sections. Only `runtime.py` reads it, so the simulator package never imports from `llm`.
 - `types.py` holds the types that cross layers (`GenerationRequest`, `GenerationPlan`, `TokenEvent`) and imports nothing from the project, so `llm` and `simulator` never need to import each other.
 - Lower layers know nothing about HTTP. They raise domain errors (for example `ResponsesConfigError` or `ContextLengthExceeded`) and `client` maps them to OpenAI-style error responses.
@@ -62,7 +67,7 @@ llm/generator.py
     tokens         = tokenizer.encode(render(variant))   or synthetic tokens
     tokens, reason = truncate(tokens, max_tokens)
     ▼  GenerationPlan(prompt_tokens, tokens, finish_reason, entry_id)
-simulator/engine.py
+simulator/ (engine for the model)
     async for event in engine.run(plan, arrival)
     ▼  TokenEvent(index, text, sim_time)
 client/sse.py ── SSE chunks            client/api.py ── one ChatCompletionResponse with Usage
@@ -78,6 +83,7 @@ Configuration is loaded when the app is created, not when a module is imported: 
 - **Pacing.** The SSE stream pulls each token from `engine.run()`, so a chunk is written only when the engine releases it; the wiring is the same for every engine. Non-streaming requests also wait for every token, so the response arrives when the simulated generation would finish. The stream sets `Cache-Control: no-cache` and `X-Accel-Buffering: no`, and no compression middleware is used, since either would buffer chunks.
 - **Disconnects.** The engine's iterator is wrapped in `contextlib.aclosing`, so its cleanup runs when a client disconnects mid-stream.
 - **OpenAI behaviour.** `model` is required. `seed`, `max_completion_tokens` (which takes precedence over the deprecated `max_tokens`) and `stream_options.include_usage` are supported; with `include_usage`, every chunk carries `"usage": null` and a final chunk with empty `choices` carries the totals. The stream starts with a `role: assistant` chunk. Parameters the simulator does not use, such as `temperature`, are accepted and ignored. `/v1/models` lists every configured model.
+- **Message content.** A request message's `content` may be a string or an array of content parts, as in OpenAI's API. The schema (`ChatMessageParam`) turns a string into one text part before validation, so errors point at paths like `messages.[0].content.[1].type` rather than at each member of a `str | list` union; responses use a separate `ChatMessage` whose content is always a string. The schema accepts every part type OpenAI defines, and `to_generation_request` decides what the simulator serves: text parts are joined with no separator into the domain `Message`, so the tokenizer, matcher and generator see plain text, and any other part (`image_url`, `input_audio`, `file`, `refusal`) is rejected with a 400 naming the part, before anything is generated or traced. Rejecting rather than dropping them keeps prompt token counts honest.
 
 ## Model deployments (`config/models.yml`)
 
@@ -166,12 +172,45 @@ await asyncio.sleep(max(0, deadline_i - time.monotonic()))
 
 The engine owns this because only the engine knows the simulated schedule. The generator and the plan stay free of timing.
 
-### Simulated and observed metrics
+### Lag
 
-- **Simulated metrics** are what the engine intended, recorded for every token. These are what a metrics endpoint exposes.
-- **Observed metrics** are what clients measure: simulated values plus network time plus any lag.
+Each `TokenEvent` carries `lag = max(0, release time − deadline)`: how late the engine released the token against its own timeline. It measures how faithfully the simulator carried out the configured strategy, not anything about the simulated hardware. Real servers have jitter too; if that is ever wanted, it belongs in the simulated timeline (seeded and reproducible), not in lag.
 
-The difference is the simulator's fidelity error. With anchoring it should be close to zero apart from the network; the lag metric shows when it is not.
+Token *i* is released at `arrival + sim_time(i) + lag(i)`, so, network aside:
+
+```
+observed TTFT     = simulated TTFT + lag(0)
+observed ITL(i)   = simulated ITL  + (lag(i) − lag(i−1))      only changes in lag matter
+observed E2E      = simulated E2E  + lag(n−1)                 the last lag, not the sum
+```
+
+| Source of lag | Typical size | Meaning |
+|---|---|---|
+| Timer granularity (asyncio waits in whole milliseconds on Linux) | about 1 ms | Normal |
+| Event loop busy with other streams, or generation holding the GIL | 1–10 ms | Approaching the process's limits |
+| A slow client (backpressure at the engine's `yield`) | any | Client-side; overdue tokens are then sent at once, keeping total time correct |
+| More tokens per second than one process can deliver | grows | Measurements no longer reflect the configured hardware |
+| Request overhead longer than the simulated TTFT | large on token 0 only | The overhead did not fit inside the TTFT |
+
+Measured on a development machine with 250 tokens at a 4 ms ITL, wake-up lateness was about 0.8–1.0 ms at p50 and under 2.6 ms at worst for 1 to 200 concurrent streams, while end-to-end time stayed within 1.5 ms of the target. Individual gaps between tokens therefore vary by about ±1 ms, but mean ITL, TPOT and throughput are accurate. This jitter is accepted; waking early and spinning could reduce it at the cost of CPU. Lag will feed the metrics layer as a validity check for experiments.
+
+### Where time is measured
+
+For each token there are four possible points to measure, and each layer of the system measures its own:
+
+```
+deadline ──▶ released by engine ──▶ written to the socket ──▶ received by the client
+ (sim_time)    (+ lag)                (+ serialization,          (+ network,
+                                        transport wait)            client parsing)
+```
+
+| Layer | Measures | Tells you |
+|---|---|---|
+| Engine | **Simulated**: `sim_time` | What the configured model intended |
+| Server metrics (`/metrics`) | **Server-observed**: release time, plus lag | Whether the simulator carried out its model faithfully |
+| Load generator (`llmsim-bench`) | **Client-observed**: receive time | What a client experiences, including transport and network |
+
+Server metrics use the release time rather than the socket write: it means the same for streaming and non-streaming requests (a non-streaming response is written once, at the end), it matches how serving engines such as vLLM time tokens, and release = arrival + `sim_time` + `lag`, so the lag histogram explains all of the difference between simulated and server-observed values. A slow client still shows up, because backpressure makes later tokens late. Transport and network costs are what separates server-observed from client-observed values; the load generator reports that gap.
 
 ### Engines
 
@@ -184,14 +223,16 @@ class Engine(ABC):
     async def stop(self) -> None: ...    # no-op by default
 ```
 
-`TokenEvent(index, text, sim_time)` carries only timing information; `finish_reason` and `usage` come from the plan, which the API already holds. `sim_time` is in simulated seconds after arrival, so token 0's value is the simulated TTFT and the gaps between tokens are the ITLs. `start` and `stop` are called from the app's lifespan; they exist for engines with a background loop, such as the scheduler. Engines are built by name with `get_engine(name)`, chosen per model in `models.yml`.
+`TokenEvent(index, text, sim_time, lag)` carries only timing information; `finish_reason` and `usage` come from the plan, which the API already holds. `sim_time` is in simulated seconds after arrival, so token 0's value is the simulated TTFT and the gaps between tokens are the ITLs. `start` and `stop` are called from the app's lifespan; they exist for engines with a background loop, such as the scheduler. The `simulator` package is organised like a Java package with one interface and several implementations: `engine.py` holds only the `Engine` base class, each engine has its own module (`instant.py`, `fixed_rate.py`, and a `scheduler/` sub-package to come), `_timing.py` holds `sleep_until`, which every timed engine shares, and `__init__.py` re-exports the public names, so callers write `from llm_simulator.simulator import FixedRateEngine`. The base module never imports its implementations, and the package never lists them; choosing one by name happens in `runtime.py`.
+
+Engines take plain parameters (for example `FixedRateEngine(prefill_tokens_per_second, decode_tokens_per_second, scheduler_overhead_s)`), never configuration classes. `runtime.py` holds a builder per engine name (`ENGINES`) that maps a model's `models.yml` sections to those parameters. Each engine class declares `required_sections`, which are checked before its builder runs. The engine is chosen per model with `engine:` in `models.yml`.
 
 When a client disconnects, the API closes the iterator and the engine releases the sequence in a `finally:` block. This frees nothing in the simpler engines but frees KV-cache capacity in the scheduler.
 
 | Engine | Timing | Shared state | Purpose |
 |---|---|---|---|
 | `InstantEngine` | None; tokens are yielded immediately | None | Wiring and functional tests |
-| `FixedRateEngine` | `ttft = overhead + prompt_tokens / prefill_tps + 1 / decode_tps`, `itl = 1 / decode_tps` | None; requests are independent | Simple baseline with configurable latency |
+| `FixedRateEngine` | `ttft = overhead + prompt_tokens / prefill_tps`, `itl = 1 / decode_tps`; overhead is paid once per request | None; requests are independent | Simple baseline with configurable latency |
 | `SchedulerEngine` | One shared step loop; each step's duration depends on the batch | Waiting queue, running batch, KV blocks | Load-dependent behaviour: queueing, batching, KV pressure |
 | Virtual-time mode (possible later) | The scheduler run as a discrete-event simulation, without real sleeps | Same as `SchedulerEngine` | Capacity planning beyond what can be streamed in real time |
 
@@ -205,10 +246,10 @@ For one request in `FixedRateEngine`, with prefill at 100,000 tok/s, decode at 2
 |---|---|---|
 | Queue latency | admitted − arrival | 0 (nothing queues) |
 | Prefill latency | prompt_tokens / prefill_tps | 10 ms |
-| TTFT | queue + overhead + prefill + first decode step | 16 ms |
+| TTFT | queue + overhead + prefill (the prefill pass produces the first token) | 12 ms |
 | ITL | one decode step | 4 ms |
 | Decode latency | (n − 1) × ITL | 796 ms |
-| E2E latency | TTFT + decode latency | 812 ms |
+| E2E latency | TTFT + decode latency | 808 ms |
 | TPOT | (E2E − TTFT) / (n − 1) | 4 ms |
 
 In `SchedulerEngine` the same metrics come out of the step loop, and they change with load.
@@ -248,9 +289,88 @@ As an example, with 80 GB of HBM, 3,000 GB/s of bandwidth, 512 KiB of KV per tok
 
 **Configuration the scheduler needs** beyond the README's example: model weight size (parameters and dtype, or `weights_gb`), `peak_tflops`, `block_size` (typically 16) and `gpu_memory_utilization` (typically 0.9).
 
+**Status: designed, parked.** The metrics layer comes first, so the end-to-end product can be measured with the existing engines; the scheduler is the final piece that brings the metrics to full fidelity.
+
+**Code layout.** Unlike the other engines, the scheduler is several separable parts, and only one of them deals with time. It is a sub-package whose pure core never imports `asyncio` or `time`:
+
+```
+simulator/scheduler/
+  __init__.py      exports SchedulerEngine only
+  kv_cache.py      BlockAllocator: capacity in blocks; allocate, grow and free a sequence's blocks
+  cost_model.py    RooflineCostModel: step_duration(batch)
+  policy.py        Scheduler: waiting and running queues, admission, batch building,
+                   preemption; returns a StepPlan for the next step
+  realtime.py      SchedulerEngine(Engine): the asyncio driver; step loop with sleep_until,
+                   a queue per request, start/stop, frees blocks when a client disconnects
+  virtual.py       later: a discrete-event driver for capacity planning, reusing the same core
+```
+
+- Dependencies point inward only: `realtime.py` → `policy.py` → `kv_cache.py`, `cost_model.py`.
+- The core is tested step by step with no clock (admission, batching, preemption, KV accounting); only the driver needs the fake clock.
+- The virtual-time mode reuses the policy, allocator and cost model with a different driver, so the two modes cannot drift apart.
+- The driver is `realtime.py` rather than a second `engine.py`, so the interface module and an implementation never share a name.
+
+## Metrics
+
+```
+ per request (short-lived)        per app (long-lived)                           storage
+┌──────────────────────┐  hooks  ┌───────────────────────┐        ┌────────────────────┐   ┌──────────────────────────────┐
+│ RequestTrace         │ ──────▶ │ MetricsRecorder (ABC) │        │ PrometheusRecorder │──▶│ CollectorRegistry            │──▶ GET /metrics
+│ arrival, first/prev/ │         │  FanOutRecorder ──────┼──┬────▶│                    │   │ counters, gauges, histograms │
+│ last release, count  │         │  NoopRecorder         │  │     └────────────────────┘   └──────────────────────────────┘
+└──────────────────────┘         └───────────────────────┘  │     ┌────────────────────┐   ┌──────────────────────────────┐
+                                                            └────▶│ SummaryRecorder    │──▶│ SampleWindows, RateWindows   │──▶ GET /metrics/summary
+                                                                  └────────────────────┘   └──────────────────────────────┘
+```
+
+- **Tracing.** A `RequestTrace` follows one request. It keeps only running state (arrival, the first, previous and last release times, a token count), so its memory is constant however long the completion. It is owned by one request and needs no locking. The engine's event stream is wrapped so that every released token passes through the trace; engines know nothing about metrics.
+- **When values are recorded.** Prompt tokens and `requests_running` when the request starts; TTFT and queue time at the first token; ITL and lag for every token; E2E, TPOT, prefill and decode time, request sizes and `requests_total{finish_reason}` when it ends. Prefill = first release − arrival − queue time; decode = last release − first release.
+- **Cancelled requests.** TTFT, ITL, lag and token counters include them, because those tokens were produced. E2E, TPOT, prefill, decode and request-size distributions include only completed requests (`stop` or `length`); otherwise disconnects would pull them down. Cancellations are counted as `requests_total{finish_reason="cancelled"}`, and failures as `"error"`.
+- **Recording.** `MetricsRecorder` is an interface, so the trace never touches a metrics library. `PrometheusRecorder` and `SummaryRecorder` are the two stores; `FanOutRecorder` forwards every call to both, so a trace reports once; `NoopRecorder` turns metrics off. There is one recorder per app, built in the composition root and given to handlers through a dependency. Its per-model label children are looked up once, at startup: a cached histogram observation costs about 0.8 µs against 1.7 µs with a label lookup, and every token makes two (ITL and lag). Token counters are incremented once per request.
+- **Storage for `/metrics`.** Each app has its own `CollectorRegistry` in process memory, holding only current values: one number per counter or gauge, and bucket counts plus a sum and count per histogram, per model. Memory is constant regardless of traffic. History is not stored by the simulator: a Prometheus server scrapes `/metrics` and keeps the time series, and throughput comes from `rate()` over the counters, which also handles counters restarting from zero after a restart. A separate registry per app keeps tests and multiple apps from sharing or double-registering metrics.
+- **Storage for `/metrics/summary`.** Percentiles estimated from histogram buckets are only accurate to about a bucket's width, which is too coarse for millisecond fidelity checks. `SummaryRecorder` keeps bounded sample windows instead: per model and metric, a `SampleWindow` ring buffer of the most recent raw values, giving exact percentiles over recent traffic with fixed memory.
+  - **Two window sizes.** Per-request metrics (TTFT, E2E, TPOT, queue, prefill, decode, prompt and generation sizes) add one value per request and keep the last 10,000 requests. Per-token metrics (ITL, lag) add one value per token, pooled across requests, and keep the last 100,000 tokens: at about 6,000 tok/s, roughly the last 15–20 s. Both are settable (`LLM_SIM_SUMMARY_REQUEST_SAMPLES`, `LLM_SIM_SUMMARY_TOKEN_SAMPLES`).
+  - **Ring buffer.** Values are stored in an `array('d')`: 8 bytes each, growing until full and then overwriting the oldest, so a model with no traffic uses almost nothing and a busy one at most about 2.2 MB. Each window also counts every value ever added, so the summary shows both `count` (recorded) and `samples` (still held). Recording a token in this store costs about 0.6 µs, against about 1.8 µs for Prometheus.
+  - **Throughput.** A `RateWindow` per model counts generated tokens and finished requests in one-second buckets over the last 60 s (`LLM_SIM_SUMMARY_RATE_SECONDS`). Each bucket remembers its second, so stale ones are zeroed on reuse without a timer. Just after startup or a reset, the rate is taken over the time since, reported as `window_seconds`, with a floor of one second.
+  - **Reading.** `snapshot()` copies every window on the event loop (about 0.5 ms with full windows, since each is a single memory copy), so recording and reading never interleave and no lock is needed. `summarize()` then sorts the copies and computes mean, min, p50, p90, p95, p99 and max, interpolating between ranks as numpy does; it runs in a worker thread (about 4.4 ms with full windows) so it does not delay token releases.
+  - **Reset.** `POST /metrics/summary/reset` clears every window, rate and count, and restarts `since_reset_seconds`, so a benchmark can measure one run. `requests.running` is kept, since those requests are still in flight; a request in flight across a reset is recorded in the new period when it finishes, so reset while idle for a clean measurement. Prometheus counters are not reset: they must only go up.
+- **Multiple workers.** With several worker processes, each has its own registry. `prometheus_client`'s multiprocess mode can be added if that is ever needed.
+
+**Metric catalogue** (every metric is labelled with `model`):
+
+| Type | Name | Records |
+|---|---|---|
+| Histogram | `llm_sim_time_to_first_token_seconds` | Server-observed TTFT |
+| Histogram | `llm_sim_inter_token_latency_seconds` | Gap between consecutive tokens |
+| Histogram | `llm_sim_request_time_per_output_token_seconds` | TPOT of completed requests |
+| Histogram | `llm_sim_e2e_request_latency_seconds` | E2E of completed requests |
+| Histogram | `llm_sim_request_queue_time_seconds` | Queue time (0 until the scheduler) |
+| Histogram | `llm_sim_request_prefill_time_seconds`, `llm_sim_request_decode_time_seconds` | Derived as above |
+| Histogram | `llm_sim_request_prompt_tokens`, `llm_sim_request_generation_tokens` | Sizes of completed requests |
+| Histogram | `llm_sim_token_lag_seconds` | Fidelity: how late each token was released |
+| Counter | `llm_sim_requests_total{finish_reason}` | `stop`, `length`, `cancelled`, `error` |
+| Counter | `llm_sim_prompt_tokens_total`, `llm_sim_generation_tokens_total` | Throughput, via `rate()` |
+| Gauge | `llm_sim_requests_running` | Active sequences |
+| Info | `llm_sim_model_info{engine, context_length}` | Which engine each model runs |
+| Later | `llm_sim_requests_waiting`, `llm_sim_kv_cache_usage_ratio`, `llm_sim_batch_size`, … | Read from the scheduler engine when metrics are scraped |
+
+Names follow vLLM's, with an `llm_sim_` prefix and underscores instead of vLLM's colons, which Prometheus reserves for recording rules. Histogram buckets are spaced logarithmically, with ranges suited to each metric (lag goes down to 10 µs so that timer jitter is visible).
+
 ## Real-time delivery budget
 
-Every real-time engine pays about one coroutine resume, one serialization and one socket write per token per stream; anchoring does not add to this. Measured in-process with 256 streams and no HTTP, a step loop delivers about 130,000 tokens/s when chunks are serialized through the Pydantic models and about 370,000 tokens/s with a prebuilt SSE template. HTTP framing and socket writes reduce this several-fold, so the working budget is on the order of tens of thousands of tokens/s per process. This still needs measuring end to end.
+Every real-time engine pays about one coroutine resume, one serialization and one socket write per token per stream; anchoring does not add to this. Measured in-process with 256 streams and no HTTP, a step loop delivers about 130,000 tokens/s when chunks are serialized through the Pydantic models and about 370,000 tokens/s with a prebuilt SSE template. HTTP framing and socket writes reduce this considerably.
+
+**Measured end to end** (one server process, OpenAI SDK clients on the same 16-core machine, about 27 tokens per response, server-side values read from `/metrics`):
+
+| Model, engine | Concurrent streams | TTFT | ITL | Lag mean / p99 | Delivered |
+|---|---|---|---|---|---|
+| `qwen-mock`, `fixed_rate` (configured: TTFT ≈ 2.1 ms, ITL 4 ms) | 1 | 2.6 ms | 4.00 ms | 0.8 / ≤ 1.3 ms | 244 tok/s |
+| | 10 | 6.7 ms | 3.85 ms | 0.8 / ≤ 6.6 ms | 1,610 tok/s |
+| | 50 | 29.6 ms | 2.97 ms | 5.7 / ≤ 50 ms | 5,843 tok/s |
+| | 200 | 185 ms | 0.14 ms | 129 / ≤ 253 ms | 5,353 tok/s |
+| `tiny-mock`, `instant` | 200 | 156 ms | 0.02 ms | 157 / ≤ 253 ms | 5,856 tok/s |
+
+One process currently delivers about **5,500–6,000 tokens/s**. Producing tokens is not the limit: measured in-process for 200 streams, the engine releases a token in about 0.7 µs, tracing and recording add about 2.4 µs and SSE serialization about 6 µs, about 9 µs in all, against roughly 170 µs per token over HTTP. Most of the cost is delivering each chunk over HTTP. Because the stream is pulled by the writer, the engine releases the next token only after the previous chunk has been sent, so delivery cost appears as lag. By default uvicorn runs on the pure-Python `h11` parser and the standard asyncio loop; with `httptools` and `uvloop` installed (`uvicorn[standard]`), mean lag at 200 streams fell from 122 ms to 18.6 ms and mean TTFT from 183 ms to 56 ms. Clean throughput figures need the load generator: an ad-hoc test that started client processes inside its timing window measured start-up time rather than throughput. Up to that rate the simulator follows its configured timeline closely; beyond it, requests queue behind the event loop, TTFT grows, overdue tokens go out in bursts (ITL falls below the configured value), and lag shows it. For `qwen-mock`'s 250 tok/s per stream, that is roughly 20 concurrent streams per process. Raising the ceiling is the next performance task.
 
 A process only needs to deliver tokens as fast as the GPU it simulates produces them, which is typically a few thousand to low tens of thousands of output tokens/s, so one process can simulate one replica. To stay within budget:
 
@@ -269,5 +389,5 @@ A process only needs to deliver tokens as fast as the GPU it simulates produces 
 
 ## Build order
 
-1. `FixedRateEngine` with arrival-anchored deadlines and the lag metric, plus the `performance` section of `models.yml`.
-2. `SchedulerEngine` with KV blocks, admission, preemption and the roofline step model.
+1. Metrics layer: tracing, recorders, Prometheus `/metrics` and `/metrics/summary` are done; next is the `llmsim-bench` load generator.
+2. `SchedulerEngine` with KV blocks, admission, preemption and the roofline step model (designed above, parked until the metrics layer is in place).

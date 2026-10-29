@@ -113,7 +113,7 @@ A template is a string with `{name}` placeholders. Write `{{` and `}}` to get li
 
 ## Evaluation
 
-1. **Input.** Take the content of the last `user` message and remove leading and trailing whitespace. This trimmed input is used for matching and for variant selection.
+1. **Input.** Take the content of the last `user` message and remove leading and trailing whitespace. A message's content may be a string or an array of text parts (`[{"type": "text", "text": "..."}]`); parts are joined with no separator, so `["Summarise:", " it"]` is the input `Summarise: it` and `{last_user_message}` renders it the same way. OpenAI does not document how it joins parts, so this is an assumption to revisit if measurement shows otherwise; the separator is `PART_SEPARATOR` in `client/convert.py`. Other part types (images, audio, files) are rejected with a 400. This trimmed input is used for matching and for variant selection.
 2. **Match.** Walk `responses` in file order. The first matching entry wins. If none match, use `default`.
 3. **Select a variant.**
    - `digest = sha256(f"{seed}\0{entry_id}\0{input}")` over the UTF-8 bytes, where `seed` is the request's `seed` if it was given, otherwise the file's `seed`, written in decimal.

@@ -11,9 +11,10 @@ models:
   - name: qwen-mock
     context_length: 32768
     tokenizer: regex
-    # instant: tokens are sent immediately. Timed engines come later and will
-    # use the sections below.
-    engine: instant
+    # fixed_rate: TTFT = scheduler overhead + prompt / prefill rate, then one
+    # token per decode step. Uses `performance` and `latency`; the scheduler
+    # engine will use the rest.
+    engine: fixed_rate
     hardware: h100-80gb
     kv_cache:
       bytes_per_token: 524288
@@ -26,5 +27,5 @@ models:
     latency:
       scheduler_overhead_ms: 2
 
-  - name: tiny-mock
+  - name: tiny-mock           # instant engine: every token is sent immediately
     context_length: 8192

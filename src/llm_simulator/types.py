@@ -55,3 +55,8 @@ class TokenEvent:
     # Simulated seconds after the request arrived at which this token is due,
     # so token 0's value is the simulated TTFT and the gaps between tokens are ITLs.
     sim_time: float
+    # Seconds the engine released this token after its deadline: the
+    # simulator's own fidelity error, not part of the simulated timeline.
+    # Observed TTFT is sim_time + lag for token 0, and observed E2E is the last
+    # token's sim_time + lag; lag never accumulates across tokens.
+    lag: float = 0.0
