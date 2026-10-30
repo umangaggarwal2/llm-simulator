@@ -52,8 +52,8 @@ class CapturingRecorder(MetricsRecorder):
         return [call for call in self.calls if call[0] == kind]
 
 
-def event(index, lag=0.0):
-    return TokenEvent(index, f"t{index}", 0.0, lag)
+def event(index, lag=0.0, sim_time=0.0):
+    return TokenEvent(index, f"t{index}", sim_time, lag)
 
 
 def make_trace(recorder, clock, arrival=100.0, prompt_tokens=8):
@@ -67,11 +67,11 @@ def test_records_ttft_itl_lag_and_timings():
     recorder, clock = CapturingRecorder(), Clock(100.0)
     trace = make_trace(recorder, clock)
     trace.start()
-    for index, (at, lag) in enumerate(
-        [(100.012, 0.001), (100.016, 0.0), (100.021, 0.002)]
+    for index, (at, lag, sim) in enumerate(
+        [(100.012, 0.001, 0.011), (100.016, 0.0, 0.015), (100.021, 0.002, 0.019)]
     ):
         clock.now = at
-        trace.token(event(index, lag))
+        trace.token(event(index, lag, sim))
     trace.finish("stop")
 
     assert recorder.of("started") == [("started", "m", 8)]
@@ -94,6 +94,8 @@ def test_records_ttft_itl_lag_and_timings():
         prefill=pytest.approx(0.012),
         decode=pytest.approx(0.009),
         tpot=pytest.approx(0.0045),
+        simulated_ttft=0.011,
+        simulated_e2e=0.019,
     )
 
 
@@ -144,6 +146,15 @@ def test_empty_completion_ends_when_finished():
     assert timings.e2e == pytest.approx(0.012)
     assert timings.prefill == pytest.approx(0.012)
     assert timings.decode == 0.0
+
+
+def test_empty_completion_has_no_simulated_times():
+    recorder, clock = CapturingRecorder(), Clock(100.0)
+    trace = make_trace(recorder, clock)
+    trace.start()
+    trace.finish("stop")
+    timings = recorder.of("finished")[0][5]
+    assert (timings.simulated_ttft, timings.simulated_e2e) == (None, None)
 
 
 def test_finish_is_reported_once():

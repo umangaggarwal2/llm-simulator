@@ -27,6 +27,11 @@ class RequestTimings:
     decode: float
     # Mean time per output token after the first; None with fewer than two tokens.
     tpot: Optional[float]
+    # The engine's own timeline: when it scheduled the first and the last
+    # token, relative to arrival. Observed minus simulated is that token's
+    # lag. None for an empty completion.
+    simulated_ttft: Optional[float] = None
+    simulated_e2e: Optional[float] = None
 
 
 class MetricsRecorder(ABC):

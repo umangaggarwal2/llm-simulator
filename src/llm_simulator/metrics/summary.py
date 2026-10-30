@@ -25,7 +25,21 @@ from llm_simulator.metrics.recorder import (
 from llm_simulator.metrics.window import RateWindow, SampleWindow, describe
 
 # Order of the latency_seconds section of the summary.
-LATENCIES = ("ttft", "itl", "tpot", "e2e", "queue", "prefill", "decode", "lag")
+LATENCIES = (
+    "ttft",
+    "itl",
+    "tpot",
+    "e2e",
+    "queue",
+    "prefill",
+    "decode",
+    "lag",
+    # The engine's timeline, for completed requests: what TTFT and E2E would
+    # be with no lag. Compared with ttft and e2e, they separate the
+    # simulator running late from delivery being slow.
+    "ttft_simulated",
+    "e2e_simulated",
+)
 SIZES = ("prompt", "generation")
 
 
@@ -77,6 +91,8 @@ class _ModelState:
         self.queue = SampleWindow(request_samples)
         self.prefill = SampleWindow(request_samples)
         self.decode = SampleWindow(request_samples)
+        self.ttft_simulated = SampleWindow(request_samples)
+        self.e2e_simulated = SampleWindow(request_samples)
         self.prompt_size = SampleWindow(request_samples)
         self.generation_size = SampleWindow(request_samples)
         self.request_rate = RateWindow(rate_seconds, clock)
@@ -194,6 +210,10 @@ class SummaryRecorder(MetricsRecorder):
         state.queue.add(timings.queue)
         state.prefill.add(timings.prefill)
         state.decode.add(timings.decode)
+        if timings.simulated_ttft is not None:
+            state.ttft_simulated.add(timings.simulated_ttft)
+        if timings.simulated_e2e is not None:
+            state.e2e_simulated.add(timings.simulated_e2e)
         if timings.tpot is not None:
             state.tpot.add(timings.tpot)
         state.prompt_size.add(prompt_tokens)

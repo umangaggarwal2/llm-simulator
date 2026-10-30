@@ -5,21 +5,15 @@ over HTTP exactly as it would talk to api.openai.com. If the SDK can parse
 every response and error, clients written for OpenAI work unchanged.
 """
 
-import socket
-import threading
 import time
 
 import httpx2
 import openai
 import pytest
-import uvicorn
-import yaml
 from openai import AsyncOpenAI, OpenAI
 from prometheus_client.parser import text_string_to_metric_families
 
-from llm_simulator.client.api import create_app
 from llm_simulator.llm.tokenizer import RegexTokenizer
-from llm_simulator.settings import Settings
 from llm_simulator.types import Message
 
 pytestmark = pytest.mark.integration
@@ -61,37 +55,9 @@ RESPONSES = {
 
 
 @pytest.fixture(scope="module")
-def base_url(tmp_path_factory):
-    config_dir = tmp_path_factory.mktemp("config")
-    (config_dir / "models.yml").write_text(yaml.safe_dump(MODELS))
-    (config_dir / "responses.yml").write_text(yaml.safe_dump(RESPONSES))
-    app = create_app(
-        Settings(
-            models_path=config_dir / "models.yml",
-            responses_path=config_dir / "responses.yml",
-        )
-    )
-
-    # Bind the socket first, so the port is known and cannot be taken by
-    # anything else before the server starts.
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("127.0.0.1", 0))
-    port = sock.getsockname()[1]
-
-    server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
-    thread = threading.Thread(target=server.run, kwargs={"sockets": [sock]})
-    thread.start()
-    deadline = time.monotonic() + 10
-    while not server.started:
-        if not thread.is_alive() or time.monotonic() > deadline:
-            raise RuntimeError("simulator did not start")
-        time.sleep(0.01)
-
-    yield f"http://127.0.0.1:{port}/v1"
-
-    server.should_exit = True
-    thread.join(timeout=10)
-    sock.close()
+def base_url(tmp_path_factory, serve):
+    with serve(tmp_path_factory.mktemp("config"), MODELS, RESPONSES) as root:
+        yield f"{root}/v1"
 
 
 @pytest.fixture

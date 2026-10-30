@@ -69,6 +69,8 @@ def test_shape_for_every_configured_model():
         "prefill",
         "decode",
         "lag",
+        "ttft_simulated",
+        "e2e_simulated",
     ]
     assert list(model["tokens_per_request"]) == ["prompt", "generation"]
     assert model["latency_seconds"]["ttft"]["p50"] is None
@@ -212,3 +214,24 @@ def test_percentiles_over_many_requests():
     assert ttft["p50"] == pytest.approx(0.0505)
     assert ttft["p99"] == pytest.approx(0.09901)
     assert (ttft["min"], ttft["max"]) == (0.001, 0.1)
+
+
+def test_simulated_windows_cover_completed_requests_only():
+    recorder = make_recorder()
+    timings = RequestTimings(
+        e2e=0.808,
+        queue=0.0,
+        prefill=0.012,
+        decode=0.796,
+        tpot=0.004,
+        simulated_ttft=0.010,
+        simulated_e2e=0.800,
+    )
+    complete(recorder, timings=timings)
+    complete(recorder)  # timings without simulated values
+    recorder.request_started("qwen-mock", 5)
+    recorder.request_finished("qwen-mock", "cancelled", 5, 0, None)
+    latency = summary(recorder)["models"]["qwen-mock"]["latency_seconds"]
+    assert latency["ttft_simulated"]["count"] == 1
+    assert latency["ttft_simulated"]["p50"] == 0.010
+    assert latency["e2e_simulated"]["max"] == 0.800

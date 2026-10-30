@@ -587,3 +587,16 @@ def test_rejected_content_is_not_traced(client):
     model = client.get("/metrics/summary").json()["models"]["big-mock"]
     assert sum(model["requests"]["finished"].values()) == 0
     assert model["requests"]["running"] == 0
+
+
+def test_summary_reports_the_simulated_timeline(client):
+    # big-mock uses the instant engine: every token is due at arrival.
+    chat(client, "hello")
+    latency = client.get("/metrics/summary").json()["models"]["big-mock"][
+        "latency_seconds"
+    ]
+    assert latency["ttft_simulated"]["count"] == 1
+    assert latency["ttft_simulated"]["p50"] == 0.0
+    assert latency["e2e_simulated"]["p50"] == 0.0
+    # Observed = simulated + lag, so observed is never earlier.
+    assert latency["ttft"]["p50"] >= latency["ttft_simulated"]["p50"]

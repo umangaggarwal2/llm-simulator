@@ -39,6 +39,10 @@ class RequestTrace:
         self._queue_time = 0.0
         self._first: Optional[float] = None
         self._last: Optional[float] = None
+        # The engine's scheduled times (TokenEvent.sim_time) of the first and
+        # last token.
+        self._first_sim: Optional[float] = None
+        self._last_sim: Optional[float] = None
         self._count = 0
         self._started = False
         self._finished = False
@@ -51,6 +55,7 @@ class RequestTrace:
         now = self._clock()
         if self._first is None:
             self._first = now
+            self._first_sim = event.sim_time
             self._recorder.first_token(
                 self._model, now - self._arrival, self._queue_time
             )
@@ -59,6 +64,7 @@ class RequestTrace:
             itl = now - self._last
         self._recorder.token(self._model, itl, event.lag)
         self._last = now
+        self._last_sim = event.sim_time
         self._count += 1
 
     def finish(self, finish_reason: str) -> None:
@@ -80,6 +86,8 @@ class RequestTrace:
                 prefill=first - self._arrival - self._queue_time,
                 decode=decode,
                 tpot=decode / (self._count - 1) if self._count > 1 else None,
+                simulated_ttft=self._first_sim,
+                simulated_e2e=self._last_sim,
             )
         self._recorder.request_finished(
             self._model, finish_reason, self._prompt_tokens, self._count, timings

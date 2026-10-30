@@ -15,12 +15,17 @@ dependencies = [
     "prometheus-client>=0.20,<1"
 ]
 
+[project.optional-dependencies]
+# The load generator, llmsim-bench: poetry install -E bench
+bench = ["aiohttp>=3.9,<4"]
+
 [project.urls]
 repository = "https://github.com/umangaggarwal2/llm-simulator"
 homepage = "https://github.com/umangaggarwal2/llm-simulator"
 
 [project.scripts]
 llmsimulator = "llm_simulator.client.api:main"
+llmsim-bench = "llm_simulator.bench.cli:main"
 
 [tool.poetry]
 packages = [

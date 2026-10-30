@@ -58,7 +58,9 @@ class Synthetic(_Model):
     @classmethod
     def _check_range(cls, tokens):
         if tokens[0] > tokens[1]:
-            raise ValueError(f"range min ({tokens[0]}) is greater than max ({tokens[1]})")
+            raise ValueError(
+                f"range min ({tokens[0]}) is greater than max ({tokens[1]})"
+            )
         return tokens
 
     @property
@@ -129,7 +131,9 @@ class Body(_Model):
     def _single_choice(self) -> Variant:
         # content and synthetic were already validated as Body fields, so build
         # the Variant directly instead of validating them a second time.
-        variant = Variant.model_construct(content=self.content, synthetic=self.synthetic)
+        variant = Variant.model_construct(
+            content=self.content, synthetic=self.synthetic
+        )
         if self.content is not None:
             try:
                 variant._parts = parse_template(self.content)
@@ -195,7 +199,9 @@ class Match(_Model):
         """Named groups defined by every pattern, so always safe to use in templates."""
         if not self._patterns:
             return frozenset()
-        return frozenset.intersection(*(frozenset(p.groupindex) for p in self._patterns))
+        return frozenset.intersection(
+            *(frozenset(p.groupindex) for p in self._patterns)
+        )
 
 
 # --- Top level ---
