@@ -1,0 +1,75 @@
+# Run from the repository root:
+#   docker compose -f docker/docker-compose.yml up -d                        the simulator on :8080
+#   docker compose -f docker/docker-compose.yml --profile bench run --rm bench   a benchmark
+# See the README, "Running in Docker".
+
+name: llm-simulator
+
+services:
+  # The simulator, for your applications: your models.yml and responses.yml.
+  simulator:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: server
+    image: llm-simulator:latest
+    ports:
+      - "${SIM_PORT:-8080}:8080"
+    volumes:
+      # A directory with models.yml and responses.yml; an absolute path, or
+      # relative to this file. Defaults to the repository's config/.
+      - ${SIM_CONFIG_DIR:-../config}:/config:ro
+    environment:
+      LLM_SIM_MODELS: /config/models.yml
+      LLM_SIM_RESPONSES: /config/responses.yml
+    # Recovers from a crash, but gives up on a config that can never load:
+    # the error stays in `docker compose logs simulator`.
+    restart: on-failure:3
+
+  # A second simulator for benchmarks only: your models.yml, but the image's
+  # bench-responses.yml, so that --max-tokens sets the exact output length.
+  bench-target:
+    profiles: [bench]
+    # The same image as the simulator; built from cache if that one exists.
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: server
+    image: llm-simulator:latest
+    volumes:
+      - ${SIM_CONFIG_DIR:-../config}:/config:ro
+    environment:
+      LLM_SIM_MODELS: /config/models.yml
+      LLM_SIM_RESPONSES: /app/config/bench-responses.yml
+    healthcheck:
+      interval: 1s
+      start_period: 10s
+      retries: 30
+
+  # The load generator. Its settings live here, in the command; edit them
+  # to change the benchmark. It reaches bench-target over the compose
+  # network, and writes the JSON results to ../results on the host.
+  bench:
+    profiles: [bench]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: bench
+    image: llm-simulator-bench:latest
+    depends_on:
+      bench-target:
+        condition: service_healthy
+    # Your user, so the results file is yours and the directory writable:
+    # export HOST_UID=$(id -u) HOST_GID=$(id -g)
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    volumes:
+      - ../results:/results
+    command:
+      - --base-url=http://bench-target:8080/v1
+      - --model=qwen-mock
+      # A rate sweep: one full run per rate, 5 s each.
+      - --rate=10,50,200,400
+      - --duration=5
+      - --input-tokens=512
+      - --max-tokens=64
+      - --output=/results/sweep.json

@@ -7,6 +7,39 @@ The simulator does not measure real GPU utilization, memory bandwidth, or comput
 
 # Installation
 
+## Locally
+Python 3.10 or later, with [Poetry](https://python-poetry.org/):
+
+```bash
+poetry install -E bench        # -E bench adds the load generator, llmsim-bench
+poetry run llmsimulator         # serves on http://localhost:8080
+```
+
+## Running in Docker
+`docker/Dockerfile` builds two images: `llm-simulator` (the server) and `llm-simulator-bench` (the load generator). `docker/docker-compose.yml` runs them. Run every command from the repository root.
+
+```bash
+docker compose -f docker/docker-compose.yml up -d --build     # the simulator on http://localhost:8080
+docker compose -f docker/docker-compose.yml logs -f simulator
+docker compose -f docker/docker-compose.yml down
+```
+
+**Your own configuration.** The simulator reads `models.yml` and `responses.yml` from a mounted directory, by default the repository's `config/`. Point `SIM_CONFIG_DIR` at another directory containing both files (an absolute path); it is mounted read-only. A config that fails validation stops the container with the same errors as running locally (`docker compose logs simulator`); after three failed restarts it stays stopped. `SIM_PORT` changes the host port.
+
+```bash
+SIM_CONFIG_DIR=/path/to/my-config docker compose -f docker/docker-compose.yml up -d
+```
+
+**Benchmarking.** The `bench` profile starts a second simulator, `bench-target`, with your `models.yml` but the image's built-in `bench-responses.yml`, so that output lengths are exact, and runs `llmsim-bench` against it over the compose network. The benchmark's settings are the `bench` service's `command` in `docker/docker-compose.yml` (by default a rate sweep of `qwen-mock` at 10, 50, 200 and 400 requests per second); edit them there. The report is printed, and the JSON results are written to `results/` on the host. `HOST_UID` and `HOST_GID` make the results file yours.
+
+```bash
+export HOST_UID=$(id -u) HOST_GID=$(id -g)
+docker compose -f docker/docker-compose.yml --profile bench run --rm bench
+docker compose -f docker/docker-compose.yml --profile bench down      # also stops bench-target
+```
+
+The images run as an unprivileged user and a single uvicorn worker: metrics are kept in process memory, so several workers would each report only their own share. The server and the load generator share the host's CPUs; if the report says the client was saturated, its latencies are inflated.
+
 # User Manual
 
 # API

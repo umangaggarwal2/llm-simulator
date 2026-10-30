@@ -25,6 +25,7 @@ Keeping them apart lets the response content stay simple and deterministic while
 | Metrics: tracing, recorder, `/metrics` | `metrics/`, `client/api.py` | Done |
 | Metrics: `/metrics/summary` with sample windows | `metrics/summary.py`, `metrics/window.py` | Done |
 | Load generator: client, closed and open loop, workload, phases, client health, server comparison, sweeps | `bench/`, `config/bench-responses.yml` | Done |
+| Docker images and compose (simulator, benchmark) | `docker/`, `.dockerignore` | Done |
 | `SchedulerEngine` | `simulator/scheduler/` | Planned |
 
 ## Layers and dependencies
@@ -416,6 +417,13 @@ data (no dependencies): config.py, records.py
 - **Closed loop.** `closed_loop()` keeps N requests in flight: each worker sends its next request when its previous one finishes. A slower server is offered less load, so this measures capacity at a fixed number of streams but hides queueing; the open loop (L6) shows it.
 - **Controlled output length.** With `config/bench-responses.yml`, every response is long synthetic text, so `max_completion_tokens` sets the exact output length; tagged prompts (`[short]`, `[long]`) select deterministic mixed lengths.
 - **Build layers.** L1 core loop, L2 percentiles, throughput and JSON report, L3 workload (input length, JSONL, prefix), L4 phases and client health, L5 comparison with `/metrics/summary`, L6 open loop and sweeps: all done. The client stays single-process until the performance work; multi-process load comes after.
+
+## Deployment (`docker/`)
+
+- **Images.** One multi-stage `Dockerfile` builds two targets from the same locked dependencies: `server` (the simulator) and `bench` (adds the `bench` extra, aiohttp). A builder stage installs the dependencies from `poetry.lock` into a virtual environment, then installs the package as a wheel, since Poetry's editable install would point at a source tree the runtime images do not have; the runtime stages copy only the environment. Both run as an unprivileged user on `python:3.10-slim`, the version the tests run on.
+- **Configuration.** The server image carries the repository's `config/` as defaults; compose mounts a directory read-only at `/config` and points `LLM_SIM_MODELS` and `LLM_SIM_RESPONSES` at it, so the composition root reads the user's files exactly as it does locally.
+- **One worker.** Metrics live in process memory, so the image runs a single uvicorn worker; more workers would each keep their own `/metrics` and summary.
+- **Benchmark topology.** The `bench` profile runs a separate `bench-target` simulator with the user's models but the image's `bench-responses.yml`, so benchmarks get exact output lengths without changing the content served to applications, and the load generator reaches it over the compose network. The benchmark's settings live in the compose file. Client and server share the host's CPUs; the load generator's client health check flags when that inflates its numbers.
 
 ## Open decisions
 

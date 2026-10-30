@@ -1,0 +1,13 @@
+# Only pyproject.toml, poetry.lock, README.md, src/ and config/ are needed.
+.git
+.venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+test
+docs
+results
+docker
+*.json
+claude.md
+.env
