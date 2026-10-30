@@ -1,6 +1,7 @@
 # Run from the repository root:
-#   docker compose -f docker/docker-compose.yml up -d                        the simulator on :8080
-#   docker compose -f docker/docker-compose.yml --profile bench run --rm bench   a benchmark
+#   docker compose -f docker/docker-compose.yml up -d                  the simulator on :8080
+#   docker/bench.sh                                                    a benchmark, then cleanup
+#   docker compose -f docker/docker-compose.yml --profile '*' down     stop everything
 # See the README, "Running in Docker".
 
 name: llm-simulator

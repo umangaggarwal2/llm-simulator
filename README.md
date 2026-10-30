@@ -21,8 +21,10 @@ poetry run llmsimulator         # serves on http://localhost:8080
 ```bash
 docker compose -f docker/docker-compose.yml up -d --build     # the simulator on http://localhost:8080
 docker compose -f docker/docker-compose.yml logs -f simulator
-docker compose -f docker/docker-compose.yml down
+docker compose -f docker/docker-compose.yml --profile '*' down    # everything, including a left-over bench-target
 ```
+
+A plain `down` only sees services outside profiles: it would leave a `bench-target` from an interrupted benchmark running, and report the network as still in use. `--profile '*'` includes every profile.
 
 **Your own configuration.** The simulator reads `models.yml` and `responses.yml` from a mounted directory, by default the repository's `config/`. Point `SIM_CONFIG_DIR` at another directory containing both files (an absolute path); it is mounted read-only. A config that fails validation stops the container with the same errors as running locally (`docker compose logs simulator`); after three failed restarts it stays stopped. `SIM_PORT` changes the host port.
 
@@ -30,13 +32,21 @@ docker compose -f docker/docker-compose.yml down
 SIM_CONFIG_DIR=/path/to/my-config docker compose -f docker/docker-compose.yml up -d
 ```
 
-**Benchmarking.** The `bench` profile starts a second simulator, `bench-target`, with your `models.yml` but the image's built-in `bench-responses.yml`, so that output lengths are exact, and runs `llmsim-bench` against it over the compose network. The benchmark's settings are the `bench` service's `command` in `docker/docker-compose.yml` (by default a rate sweep of `qwen-mock` at 10, 50, 200 and 400 requests per second); edit them there. The report is printed, and the JSON results are written to `results/` on the host. `HOST_UID` and `HOST_GID` make the results file yours.
+**Benchmarking.** The `bench` profile starts a second simulator, `bench-target`, with your `models.yml` but the image's built-in `bench-responses.yml`, so that output lengths are exact, and runs `llmsim-bench` against it over the compose network. The benchmark's settings are the `bench` service's `command` in `docker/docker-compose.yml` (by default a rate sweep of `qwen-mock` at 10, 50, 200 and 400 requests per second); edit them there. The report is printed, and the JSON results are written to `results/` on the host.
+
+```bash
+docker/bench.sh
+```
+
+The script builds the images if needed, runs the benchmark as your user (so `results/` is writable and the results file is yours), and then removes `bench-target`, also after a failure or Ctrl-C; a running `simulator` is left alone. It wraps the plain compose commands:
 
 ```bash
 export HOST_UID=$(id -u) HOST_GID=$(id -g)
 docker compose -f docker/docker-compose.yml --profile bench run --rm bench
-docker compose -f docker/docker-compose.yml --profile bench down      # also stops bench-target
+docker compose -f docker/docker-compose.yml --profile bench rm --stop --force bench-target
 ```
+
+`run --rm` removes the load generator's container when it exits, but Compose leaves the services it depended on, `bench-target` here, running.
 
 The images run as an unprivileged user and a single uvicorn worker: metrics are kept in process memory, so several workers would each report only their own share. The server and the load generator share the host's CPUs; if the report says the client was saturated, its latencies are inflated.
 
