@@ -44,3 +44,36 @@ async def test_late_wake_up_is_reported_as_lag():
         clock.now += seconds + 0.002
 
     assert await sleep_until(10.5, clock, oversleep) == pytest.approx(0.002)
+
+
+async def test_early_wake_up_sleeps_again_for_the_rest():
+    clock = FakeClock(10.0)
+    sleeps = []
+
+    async def undersleep(seconds):
+        # Like uvloop: the first sleep wakes 1.2 ms before the deadline; the
+        # sleep for the remainder then lets that much time pass.
+        sleeps.append(seconds)
+        clock.now += seconds - 0.0012 if len(sleeps) == 1 else seconds
+
+    lag = await sleep_until(10.5, clock, undersleep)
+    assert clock.now >= 10.5
+    assert lag == 0.0
+    assert sleeps == [pytest.approx(0.5), pytest.approx(0.0012)]
+
+
+def test_never_releases_early_on_uvloop():
+    uvloop = pytest.importorskip("uvloop")
+    import asyncio
+    import random
+    import time
+
+    async def probe():
+        earliest = float("inf")
+        for _ in range(500):
+            deadline = time.monotonic() + random.uniform(0.0001, 0.005)
+            await sleep_until(deadline, time.monotonic, asyncio.sleep)
+            earliest = min(earliest, time.monotonic() - deadline)
+        return earliest
+
+    assert uvloop.run(probe()) >= 0.0

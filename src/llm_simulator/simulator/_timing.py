@@ -13,8 +13,13 @@ async def sleep_until(deadline: float, clock: Clock, sleep: Sleep) -> float:
     A deadline that has already passed (a slow consumer, or request overhead
     longer than the simulated delay) returns at once rather than shifting
     later deadlines, so lateness never accumulates.
+
+    A sleep can also end early: uvloop's timers have millisecond resolution
+    and read a cached loop clock, and wake up to about a millisecond before
+    the deadline. Sleeping again for whatever remains means a token is never
+    released before its scheduled time; the extra sleeps are short and still
+    yield to the event loop.
     """
-    delay = deadline - clock()
-    if delay > 0:
-        await sleep(delay)
-    return max(0.0, clock() - deadline)
+    while (remaining := deadline - clock()) > 0:
+        await sleep(remaining)
+    return clock() - deadline
