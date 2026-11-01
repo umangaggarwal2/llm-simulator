@@ -1,3 +1,6 @@
+import dataclasses
+import random
+import re
 from pathlib import Path
 
 import pytest
@@ -141,3 +144,115 @@ def test_every_schema_operator_has_a_builder():
 def test_real_config(text, expected):
     matcher = Matcher(load_responses(REPO_ROOT / "config" / "responses.yml"))
     assert matcher.match(text).entry_id == expected
+
+
+# --- Pre-filter ---
+
+
+def never_called(text, folded):
+    raise AssertionError("the pre-filter should have skipped this rule")
+
+
+def without_running(matcher, index):
+    """Make rule `index` fail the test if the matcher runs its regex."""
+    rules = list(matcher._rules)
+    rules[index] = dataclasses.replace(rules[index], test=never_called)
+    matcher._rules = tuple(rules)
+    return matcher
+
+
+def test_rule_missing_a_required_string_is_not_run():
+    matcher = without_running(
+        make_matcher(
+            {"match": {"regex": r"\bhamlet\b.*\bquotes?\b"}},
+            {"match": {"regex": r"\bmacbeth\b"}},
+        ),
+        0,
+    )
+    assert matcher.match("quotes from Macbeth").entry_id == "e1"
+
+
+def test_rule_with_its_strings_present_is_run_and_may_still_fail():
+    matcher = make_matcher(
+        {"match": {"regex": r"\bhamlet\b"}},
+        {"match": {"regex": r"hamlet"}},
+    )
+    # "hamlet" is present, so e0 runs, but its word boundaries fail.
+    assert matcher.match("hamlets").entry_id == "e1"
+
+
+def test_rule_with_several_patterns_runs_when_any_could_match():
+    matcher = make_matcher({"match": {"regex": ["hamlet", "macbeth"]}})
+    assert matcher.match("macbeth").entry_id == "e0"
+
+
+def test_rules_without_requirements_are_always_run():
+    matcher = make_matcher(
+        {"match": {"regex": r"\d{4}"}},
+        {"match": {"contains": "year"}},
+    )
+    assert matcher.match("in 1603").entry_id == "e0"
+    assert matcher.match("which year").entry_id == "e1"
+
+
+def test_non_ascii_text_is_still_filtered():
+    matcher = without_running(
+        make_matcher(
+            {"match": {"regex": r"hamlet"}},
+            {"match": {"regex": r"macbeth"}},
+        ),
+        0,
+    )
+    assert matcher.match("who’s in Macbeth? 😀").entry_id == "e1"
+
+
+@pytest.mark.parametrize(
+    "pattern, text",
+    [
+        ("kelvin", "\u212aelvin"),
+        (r"\bline\b", "l\u0131ne"),
+        (r"\bline\b", "L\u0130NE"),
+        ("class", "cla\u017f\u017f"),
+    ],
+)
+def test_case_traps_match_as_the_regex_does(pattern, text):
+    # re.IGNORECASE matches these characters to ASCII letters that their
+    # casefold lacks, so the pre-filter must step aside for them.
+    assert re.search(pattern, text, re.IGNORECASE)
+    assert make_matcher({"match": {"regex": pattern}}).match(text).entry_id == "e0"
+
+
+def unfiltered(matcher, text):
+    """The first match the way it was found before the pre-filter."""
+    folded = text.casefold()
+    return next(
+        (r.entry_id for r in matcher._rules if r.test(text, folded) is not None),
+        DEFAULT_ID,
+    )
+
+
+def test_prefilter_never_changes_the_answer_on_the_sample_config():
+    matcher = Matcher(load_responses(REPO_ROOT / "config" / "responses.yml"))
+    rng = random.Random(0)
+    needles = list(matcher._needles)
+    # Near misses: required strings inside other words, and spellings the
+    # regexes may or may not accept.
+    near = ["learn", "clear", "hamlets", "quotation", "Quotes", "symbolism", "who's"]
+    filler = "the a of and to in is what who tell me about please book story".split()
+    traps = ["\u0130", "\u0131", "\u017f", "\u212a", "’", "é", "😀"]
+
+    def word():
+        pool = rng.choice((needles, near, filler, filler))
+        token = rng.choice(pool)
+        if rng.random() < 0.1:
+            token = token.upper()
+        if rng.random() < 0.05:
+            at = rng.randrange(len(token) + 1)
+            token = token[:at] + rng.choice(traps) + token[at:]
+        return token
+
+    texts = [
+        " ".join(word() for _ in range(rng.randint(1, 30))) for _ in range(5000)
+    ] + [" ".join(word() for _ in range(500)) for _ in range(20)]
+    for text in texts:
+        assert matcher.match(text).entry_id == unfiltered(matcher, text), text

@@ -71,6 +71,7 @@ A match has exactly one operator. All matching is case-insensitive.
 - **Input** is the `content` of the last message with `role: user`, with leading and trailing whitespace removed, so `"hello\n"` matches `exact: "hello"`. If there is no user message, the input is the empty string.
 - **Lists** are OR: the entry matches if any value matches.
 - **Regex named groups** (`(?P<name>...)`) become [template variables](#template). When `regex` is a list, a placeholder may only refer to groups defined in every pattern.
+- **Regex speed.** A regex whose matches must contain a plain word, such as `\bhamlet\b` or `(?=.*\b(quotes?|lines?)\b)`, is skipped without running when the input lacks that word, which keeps long prompts cheap with many entries. Patterns made only of classes and wildcards (`\d{4}`, `^.{500,}`) have no such word and run on every input; matching results are the same either way.
 
 ## Body
 

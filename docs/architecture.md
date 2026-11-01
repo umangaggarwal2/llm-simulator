@@ -128,8 +128,9 @@ Finds the first `responses.yml` entry that matches the input and returns `MatchR
 - Each entry is compiled once into a rule with a test function, built by a per-operator builder. `match()` casefolds the input once and loops over the rules with no per-operator branching.
 - Regexes run against the original text, so captured groups keep the user's casing.
 - Falls back to `default` (`entry_id == "default"`) when nothing matches.
+- **Literal pre-filter** (`llm/prefilter.py`). At load time, each regex is parsed with Python's own regex parser (`sre_parse`, `re._parser` from 3.11) and walked for the plain strings every match must contain: literal runs of three or more ASCII characters, with lookaheads and required groups adding requirements (all of them) and alternations offering them (any branch). `(?=.*\bhamlet\b)(?=.*\b(quotes?|lines?)\b)` requires `hamlet` and one of `quote`, `line`. Per input, `match()` searches the casefolded text once for every distinct required string (115 for the sample config), then skips any rule whose requirements are not all present with a set test instead of running its regex. The analysis is conservative: anything it does not understand, including parser changes in a later Python, requires nothing, so a rule can be run needlessly but never skipped when it could match. One exception to substring tests is handled explicitly: `re.IGNORECASE` matches four non-ASCII characters (`İ ı ſ K`) to ASCII letters, and two of them casefold to something else, so text containing any of them is not filtered. A test checks that list against every code point, and another checks that the filter returns the same entry as unfiltered matching on thousands of generated prompts against the sample config.
 
-**Known cost.** Matching is linear in input length × number of entries. Against the sample config (194 regex entries), an unmatched 120 KB prompt takes about 380 ms. Arrival-anchored timing (below) absorbs most of this, and generation can run off the event loop. A result cache keyed on the input, or a cap on how much input is matched, are options if measurements still require them.
+**Known cost.** Matching is linear in input length. Regex searches dominate it: a lookahead pattern such as the one above backtracks over the whole input, about 45 µs per rule for a 3.3k-character prompt, while a substring test takes under 2 µs. Against the sample config (194 regex entries), the pre-filter cuts a 512-token prompt from 10.7 ms to 0.47 ms and an unmatched 120 KB prompt from 400 ms to 2 ms; short chat messages take under 0.1 ms either way. Matching runs in the threadpool but holds the GIL, so before the pre-filter it was most of the server's CPU under load with long prompts (about 88% of GIL time at 60 requests per second) and stalled the event loop. What remains is rules without requirements, which always run, and rules whose required string occurs inside other words (`lear` in "learn"), whose regex runs and then fails.
 
 ### Generator (`llm/generator.py`)
 
@@ -290,7 +291,7 @@ As an example, with 80 GB of HBM, 3,000 GB/s of bandwidth, 512 KiB of KV per tok
 
 **Configuration the scheduler needs** beyond the README's example: model weight size (parameters and dtype, or `weights_gb`), `peak_tflops`, `block_size` (typically 16) and `gpu_memory_utilization` (typically 0.9).
 
-**Status: designed, parked.** The metrics layer comes first, so the end-to-end product can be measured with the existing engines; the scheduler is the final piece that brings the metrics to full fidelity.
+**Status: designed; next to build.** It was parked until the metrics layer and load generator could measure the existing engines. Both are done, and so is the performance groundwork that gives one process the headroom recorded under Known limits.
 
 **Code layout.** Unlike the other engines, the scheduler is several separable parts, and only one of them deals with time. It is a sub-package whose pure core never imports `asyncio` or `time`:
 
@@ -425,6 +426,37 @@ data (no dependencies): config.py, records.py
 - **One worker.** Metrics live in process memory, so the image runs a single uvicorn worker; more workers would each keep their own `/metrics` and summary.
 - **Benchmark topology.** The `bench` profile runs a separate `bench-target` simulator with the user's models but the image's `bench-responses.yml`, so benchmarks get exact output lengths without changing the content served to applications, and the load generator reaches it over the compose network. The benchmark's settings live in the compose file. Client and server share the host's CPUs; the load generator's client health check flags when that inflates its numbers.
 
+## Known limits: the single-process fidelity envelope
+
+How closely one simulator process keeps the engine's timeline under load, measured on 2026-10-30 and 2026-11-01. The setup:
+
+- **Model and engine:** `qwen-mock` on `fixed_rate`, so the simulated TTFT is 7.12 ms and the simulated TPOT is 4.00 ms.
+- **Load:** open-loop Poisson arrivals of synthetic 512-token prompts, asking for 64 output tokens. `bench-responses.yml` returns exactly 64.
+- **Server stack:** uvicorn with httptools and uvloop, one worker.
+- **Client:** `llmsim-bench`, which was not saturated in any run.
+
+| Offered load | Output tok/s | Server lag p50 / p99 | Server TTFT p50 / p99 | TPOT p50 |
+|---|---|---|---|---|
+| 10 req/s | 600 | 0.37 / 1.4 ms | 7.5 / 8.6 ms | 4.00 ms |
+| 50 req/s | 2,900 | 0.34 / 1.4 ms | 7.4 / 8.5 ms | 4.00 ms |
+| 200 req/s | 13,100 | 0.38 / 3.7 ms | 7.6 / 31.8 ms | 4.00 ms |
+| 250 req/s | 16,200 | 0.42 / 14.1 ms | 7.8 / 49.1 ms | 4.00 ms |
+| 300 req/s | 19,400 | 0.61 / 34.0 ms | 9.0 / 78.4 ms | 3.98 ms |
+| 350 req/s | 22,400 | 2.9 / 82.3 ms | 44.5 / 123.8 ms | 3.45 ms |
+| 400 req/s | 25,300 | 16.2 / 187.6 ms | 126.5 / 228.4 ms | 2.21 ms |
+
+- **What the table means.** One process holds the timeline to within a few milliseconds up to about **200 requests per second, or about 13,000 output tokens per second**. At about 250 req/s the TTFT tail starts to grow, and by about 350 req/s the median falls behind as well. The limits are the event loop and the GIL, not the client.
+- **The first token is the most exposed.** It has the smallest time budget and the longest path. That path runs through request validation, the threadpool hop to `generate` and back, response start and the role chunk, all while queued behind every other stream's tokens.
+- **Late tokens catch up.** Token deadlines are anchored to the request's arrival, so lateness never accumulates. Overdue tokens go out back to back. TPOT then reads below the configured 4 ms, while E2E stays within about 1–4% of the schedule.
+- **The same load against a realistic `responses.yml` behaves the same.** With the sample config, 300 req/s gave this server-side error against the fixed-rate model:
+  - **TTFT:** +2.6 ms at the median and +93 ms at p99
+  - **E2E:** +1.3% mean
+  - **TPOT:** 3.94 ms at the median
+
+  Before the regex pre-filter, the same run collapsed at about 60 req/s.
+- **How to read results past the envelope.** Lag measures the process, not the model. The `fidelity` line and the server comparison flag it. An engine with a capacity model, such as `SchedulerEngine`, gives meaningful results only while its simulated output rate stays inside this envelope. Beyond it, run more processes as more replicas, or use the planned virtual-time mode.
+- **Not yet attributed.** Where the first-token time goes stage by stage has not been measured. Per-token transport costs (Pydantic SSE chunks, per-token metrics, the send chain) are the candidates for raising the envelope, and are deferred until after the scheduler, whose step loop changes the per-token path.
+
 ## Open decisions
 
 - **Step-duration model.** Roofline (recommended for `SchedulerEngine`), the empirical rates from the README (kept for `FixedRateEngine`), or roofline scaled by an efficiency factor calibrated against a real measurement.
@@ -432,4 +464,6 @@ data (no dependencies): config.py, records.py
 ## Build order
 
 1. Metrics layer: tracing, recorders, Prometheus `/metrics` and `/metrics/summary` are done. The `llmsim-bench` load generator is done (L1–L6).
-2. `SchedulerEngine` with KV blocks, admission, preemption and the roofline step model (designed above, parked until the metrics layer is in place).
+2. Performance groundwork: `uvicorn[standard]` (httptools and uvloop) and the regex pre-filter are done; the resulting envelope is recorded under Known limits.
+3. `SchedulerEngine` with KV blocks, admission, preemption and the roofline step model (designed above): next.
+4. Transport work on the scheduler's token path, starting with a per-stage breakdown of first-token time.
