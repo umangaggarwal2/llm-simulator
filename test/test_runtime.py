@@ -4,7 +4,7 @@ from llm_simulator.llm.models import ModelsConfig, ModelsConfigError
 from llm_simulator.llm.responses import ResponsesConfig
 from llm_simulator.llm.tokenizer import RegexTokenizer
 from llm_simulator import runtime as runtime_module
-from llm_simulator.runtime import EngineBuilder, build_runtimes
+from llm_simulator.runtime import EngineBuilder, _scheduler_parts, build_runtimes
 from llm_simulator.simulator import FixedRateEngine, InstantEngine
 from llm_simulator.types import GenerationRequest, Message
 
@@ -70,7 +70,9 @@ def test_engine_required_sections_are_enforced(monkeypatch):
     monkeypatch.setitem(
         runtime_module.ENGINES,
         NeedsPerformance.name,
-        EngineBuilder(NeedsPerformance, lambda deployment: NeedsPerformance()),
+        EngineBuilder(
+            NeedsPerformance, lambda deployment, hardware: NeedsPerformance()
+        ),
     )
     with pytest.raises(
         ModelsConfigError,
@@ -140,3 +142,86 @@ def test_fixed_rate_requires_performance():
             models({"name": "m", "context_length": 10, "engine": "fixed_rate"}),
             RESPONSES,
         )
+
+
+# --- Scheduler parts ---
+
+H100 = {"hbm_gib": 80, "memory_bandwidth_gbps": 3000, "peak_tflops": 989}
+SCHEDULED = {
+    "name": "m",
+    "context_length": 32768,
+    "hardware": "h100",
+    "weights": {"parameters_billions": 6.74},
+    "kv_cache": {"bytes_per_token": 524288},
+    "scheduler": {"max_batch_tokens": 8192, "max_num_sequences": 64},
+}
+
+
+def scheduler_parts(hardware=None, **overrides):
+    config = ModelsConfig.model_validate(
+        {
+            "version": 1,
+            "hardware": {"h100": {**H100, **(hardware or {})}},
+            "models": [{**SCHEDULED, **overrides}],
+        }
+    )
+    deployment = config.models[0]
+    return _scheduler_parts(deployment, config.hardware_for(deployment))
+
+
+def test_scheduler_kv_capacity_uses_gib_of_hbm():
+    # 80 GiB x 0.9 = 77.3e9 bytes; minus 13.48e9 of weights; 8 MiB per block.
+    policy = scheduler_parts().policy
+    kv = policy._kv
+    assert kv.num_blocks == 7609
+    assert kv.watermark_blocks == 76
+    assert kv.block_size == 16
+
+
+def test_scheduler_cost_model_converts_units():
+    cost = scheduler_parts(
+        latency={"step_overhead_ms": 1.5},
+        efficiency={"compute": 0.5, "memory": 0.8},
+    ).cost
+    assert cost.parameters == pytest.approx(6.74e9)
+    assert cost.weight_bytes == pytest.approx(13.48e9)
+    assert cost.peak_flops == pytest.approx(989e12)
+    assert cost.memory_bandwidth == pytest.approx(3000e9)
+    assert (cost.compute_efficiency, cost.memory_efficiency) == (0.5, 0.8)
+    assert cost.step_overhead_s == pytest.approx(0.0015)
+
+
+def test_scheduler_optional_sections_have_defaults():
+    cost = scheduler_parts().cost
+    assert (cost.compute_efficiency, cost.memory_efficiency) == (1.0, 1.0)
+    assert cost.step_overhead_s == 0
+
+
+def test_scheduler_bytes_per_parameter_sets_weight_size():
+    cost = scheduler_parts(
+        weights={"parameters_billions": 6.74, "bytes_per_parameter": 1}
+    ).cost
+    assert cost.weight_bytes == pytest.approx(6.74e9)
+    assert cost.parameters == pytest.approx(6.74e9)
+
+
+def test_scheduler_needs_peak_tflops():
+    with pytest.raises(ValueError, match="hardware 'h100' needs peak_tflops"):
+        scheduler_parts(hardware={"peak_tflops": None})
+
+
+def test_scheduler_weights_must_fit():
+    with pytest.raises(ValueError, match="no room for the KV cache"):
+        scheduler_parts(weights={"parameters_billions": 40})
+
+
+def test_scheduler_context_length_must_fit_the_cache():
+    # 7,609 blocks less a 76-block watermark admit 120,528 tokens.
+    scheduler_parts(context_length=120_528)
+    with pytest.raises(ValueError, match="admits at most 120528 tokens"):
+        scheduler_parts(context_length=120_529)
+
+
+def test_scheduler_batch_must_hold_a_decode_per_sequence():
+    with pytest.raises(ValueError, match="max_batch_tokens"):
+        scheduler_parts(scheduler={"max_batch_tokens": 32, "max_num_sequences": 64})

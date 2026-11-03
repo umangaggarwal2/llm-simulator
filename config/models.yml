@@ -4,8 +4,9 @@ version: 1
 
 hardware:
   h100-80gb:
-    hbm_gb: 80
+    hbm_gib: 80
     memory_bandwidth_gbps: 3000
+    peak_tflops: 989
 
 models:
   - name: qwen-mock
@@ -26,6 +27,31 @@ models:
       max_num_sequences: 64
     latency:
       scheduler_overhead_ms: 2
+
+  # The same model under load: one shared step loop batches every request on
+  # the GPU, so latency depends on what else is running. See "Scheduler and
+  # KV-cache model" in docs/architecture.md.
+  - name: qwen-mock-batched
+    context_length: 32768
+    tokenizer: regex
+    engine: scheduler
+    hardware: h100-80gb
+    weights:
+      parameters_billions: 6.74
+      bytes_per_parameter: 2
+    kv_cache:
+      bytes_per_token: 524288
+      block_size: 16
+      gpu_memory_utilization: 0.9
+      watermark: 0.01
+    scheduler:
+      max_batch_tokens: 8192
+      max_num_sequences: 64
+    latency:
+      step_overhead_ms: 0
+    efficiency:
+      compute: 1.0
+      memory: 1.0
 
   - name: tiny-mock           # instant engine: every token is sent immediately
     context_length: 8192

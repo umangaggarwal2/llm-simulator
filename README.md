@@ -1,9 +1,24 @@
 # llm-simulator
-A deterministic fake LLM that streams tokens through OpenAI compatible API, provides custom GPU configurations and simulates metrics.
+A GPU-free, deterministic stand-in for an OpenAI-compatible LLM server. Its latency and throughput respond to load the way a real serving engine's do, so the systems built on top of a model can find their own bottlenecks and failure modes without paying for model inference.
 
-The simulator models an LLM serving system at the token level. It measures client-visible latency and throughput while simulating the resource constraints that drive those metrics: GPU memory, compute, memory bandwidth, KV-cache capacity, batching, and scheduling.
+## What it is for
 
-The simulator does not measure real GPU utilization, memory bandwidth, or compute utilization. These are modeled metrics derived from the configured hardware and serving-capacity parameters.
+Testing everything that sits **in front of** a model: gateways, routers, load balancers, autoscalers, rate limiters, retry and timeout logic, streaming clients, and the dashboards and alerts that watch them. It answers "how does my system behave when the model slows down like this?", in CI, on a laptop or in Docker, with the same answer every run.
+
+It is **not** a way to predict how fast a particular model will run on particular GPUs. Only the real engine, or a simulator built from profiled kernels, answers that.
+
+## How faithful it is
+
+| Aspect | Fidelity | Why |
+|---|---|---|
+| API: OpenAI request and response format, streaming, errors, `max_tokens` | High | Built to match the real API |
+| Load trends: queueing under overload, TTFT growing with load, ITL rising with batch and context, prefill interference, KV-cache pressure and preemption | High (with the scheduler engine, in progress) | It applies the same scheduling rules as vLLM, so the curves have the right shape |
+| Absolute numbers, such as "ITL is 23 ms at 40 users" | Medium; good once calibrated | The step-time model is an idealised roofline; one measurement against a real server anchors it |
+| Content: what the model says | None, by design | Responses are scripted in `responses.yml` and deterministic |
+
+The simulator models the resource constraints that drive client-visible latency and throughput: GPU memory, compute, memory bandwidth, KV-cache capacity, batching and scheduling. It does not measure real GPU utilization; those are modelled values derived from the configured hardware.
+
+**Limits.** One process keeps faithful timing up to about 200 requests per second or 13,000 output tokens per second (see [Known limits](docs/architecture.md#known-limits-the-single-process-fidelity-envelope)); beyond that, run more replicas, as you would with real servers. Results are trustworthy while the `token_lag_seconds` metric, the simulator's own timing error, stays small; the `llmsim-bench` report flags it.
 
 # Installation
 
@@ -56,21 +71,22 @@ The images run as an unprivileged user and a single uvicorn worker: metrics are 
 The simulator serves `POST /v1/chat/completions` (streaming and non-streaming) and `GET /v1/models`, so OpenAI's SDKs and other OpenAI clients work unchanged with `base_url` pointed at it. A message's `content` may be a string or an array of text parts (`[{"type": "text", "text": "..."}]`); text parts are joined with no separator. The simulated models are text-only, so image, audio and file parts are rejected with a 400.
 
 # Configuration YAML
-`config/models.yml` lists the models the simulator serves; clients pick one with the request's `model` field. Hardware profiles are defined once and referenced by name, and each model that references a profile gets its own simulated GPU of that type.
+`config/models.yml` lists the models the simulator serves; clients pick one with the request's `model` field. Hardware profiles are defined once and referenced by name, and each model that references a profile gets its own simulated GPU of that type. Memory is in GiB (`hbm_gib`); bandwidth (`memory_bandwidth_gbps`) and `peak_tflops` are decimal, as GPU vendors quote them.
 
 ```yaml
 version: 1
 
 hardware:
   h100-80gb:
-    hbm_gb: 80
+    hbm_gib: 80
     memory_bandwidth_gbps: 3000
+    peak_tflops: 989
 
 models:
   - name: qwen-mock
     context_length: 32768
     tokenizer: regex          # default: regex
-    engine: fixed_rate        # instant (default) or fixed_rate
+    engine: fixed_rate        # instant (default), fixed_rate or scheduler
     hardware: h100-80gb
     kv_cache:
       bytes_per_token: 524288
@@ -93,6 +109,7 @@ Only `name` and `context_length` are required. The engine decides when tokens ar
 |---|---|---|
 | `instant` | Every token immediately | nothing |
 | `fixed_rate` | First token after `scheduler_overhead_ms` + prompt tokens / `prefill_tokens_per_second`, then one token every 1 / `decode_tokens_per_second` | `performance` (`latency` optional) |
+| `scheduler` | Continuous batching on one simulated GPU: requests share steps, wait when the KV cache or `max_num_sequences` is full, and are preempted when the cache runs out. Each step takes as long as a roofline model of the batch says. See `qwen-mock-batched` in `config/models.yml` for every field | `hardware` (with `peak_tflops`), `weights`, `kv_cache`, `scheduler` (`latency`, `efficiency` optional) |
 
 The other sections are needed only by the engines that use them; the server refuses to start if a model's engine needs a section the model does not define, or if the file has an unknown key, a duplicate name or an unknown hardware profile.
 

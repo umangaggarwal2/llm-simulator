@@ -35,7 +35,7 @@ class RequestTrace:
         self._arrival = arrival
         self._prompt_tokens = prompt_tokens
         self._clock = clock
-        # Always 0 until an engine with a waiting queue reports admission.
+        # 0 unless the engine reports admission on the first token.
         self._queue_time = 0.0
         self._first: Optional[float] = None
         self._last: Optional[float] = None
@@ -56,6 +56,8 @@ class RequestTrace:
         if self._first is None:
             self._first = now
             self._first_sim = event.sim_time
+            if event.queue_time is not None:
+                self._queue_time = event.queue_time
             self._recorder.first_token(
                 self._model, now - self._arrival, self._queue_time
             )

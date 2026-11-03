@@ -252,7 +252,9 @@ class RecordingEngine(InstantEngine):
             yield event
 
 
-RECORDING = EngineBuilder(RecordingEngine, lambda deployment: RecordingEngine())
+RECORDING = EngineBuilder(
+    RecordingEngine, lambda deployment, hardware: RecordingEngine()
+)
 
 
 def test_engines_start_and_stop_with_the_app(tmp_path, monkeypatch):

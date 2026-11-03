@@ -60,3 +60,6 @@ class TokenEvent:
     # Observed TTFT is sim_time + lag for token 0, and observed E2E is the last
     # token's sim_time + lag; lag never accumulates across tokens.
     lag: float = 0.0
+    # Simulated seconds the request waited before an engine with a waiting
+    # queue admitted it. Set on token 0 only, and only by such engines.
+    queue_time: Optional[float] = None

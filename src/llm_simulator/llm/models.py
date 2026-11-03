@@ -26,6 +26,8 @@ from llm_simulator.llm._loading import load_yaml_model
 PositiveInt = Annotated[StrictInt, Field(ge=1)]
 PositiveNumber = Annotated[Union[StrictInt, StrictFloat], Field(gt=0)]
 NonNegativeNumber = Annotated[Union[StrictInt, StrictFloat], Field(ge=0)]
+# A share of a whole: greater than 0, at most 1.
+Fraction = Annotated[Union[StrictInt, StrictFloat], Field(gt=0, le=1)]
 
 # What clients send as `model`: any non-empty name without whitespace,
 # e.g. "qwen-mock" or "Qwen/Qwen2.5-7B-Instruct".
@@ -45,14 +47,31 @@ class _Model(BaseModel):
 
 
 class HardwareProfile(_Model):
-    """A GPU type. Each model that references it gets its own simulated GPU."""
+    """A GPU type. Each model that references it gets its own simulated GPU.
 
-    hbm_gb: PositiveNumber
+    Memory is in GiB (2**30 bytes), as memory is built and reported;
+    bandwidth and FLOPS are decimal, as vendors quote them.
+    """
+
+    hbm_gib: PositiveNumber
     memory_bandwidth_gbps: PositiveNumber
+    # Dense fp16/bf16 peak; required by the scheduler engine.
+    peak_tflops: Optional[PositiveNumber] = None
+
+
+class Weights(_Model):
+    # Billions, as a plain decimal: YAML reads 6.74e9 as a string.
+    parameters_billions: PositiveNumber
+    bytes_per_parameter: PositiveNumber = 2
 
 
 class KvCache(_Model):
     bytes_per_token: PositiveInt
+    block_size: PositiveInt = 16
+    # The share of HBM the engine may use, for weights and KV, as in vLLM.
+    gpu_memory_utilization: Fraction = 0.9
+    # The share of KV blocks admission must leave free.
+    watermark: Annotated[Union[StrictInt, StrictFloat], Field(ge=0, lt=1)] = 0.01
 
 
 class Performance(_Model):
@@ -66,11 +85,29 @@ class Scheduler(_Model):
 
 
 class Latency(_Model):
+    # fixed_rate: paid once per request, before prefill.
     scheduler_overhead_ms: NonNegativeNumber = 0
+    # scheduler: paid by every step, so by every token of every sequence.
+    step_overhead_ms: NonNegativeNumber = 0
+
+
+class Efficiency(_Model):
+    """What real kernels reach, as a share of the hardware's peak figures."""
+
+    compute: Fraction = 1.0
+    memory: Fraction = 1.0
 
 
 # Names of the optional sections, as engines refer to them in required_sections.
-SECTIONS = ("hardware", "kv_cache", "performance", "scheduler", "latency")
+SECTIONS = (
+    "hardware",
+    "weights",
+    "kv_cache",
+    "performance",
+    "scheduler",
+    "latency",
+    "efficiency",
+)
 
 
 # --- Models ---
@@ -83,10 +120,12 @@ class ModelDeployment(_Model):
     engine: str = "instant"
     # Name of a profile under the top-level `hardware` key.
     hardware: Optional[str] = None
+    weights: Optional[Weights] = None
     kv_cache: Optional[KvCache] = None
     performance: Optional[Performance] = None
     scheduler: Optional[Scheduler] = None
     latency: Optional[Latency] = None
+    efficiency: Optional[Efficiency] = None
 
 
 class ModelsConfig(_Model):

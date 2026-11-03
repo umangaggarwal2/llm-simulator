@@ -99,6 +99,26 @@ def test_records_ttft_itl_lag_and_timings():
     )
 
 
+def test_queue_time_comes_from_the_first_event():
+    recorder, clock = CapturingRecorder(), Clock(100.0)
+    trace = make_trace(recorder, clock)
+    trace.start()
+    clock.now = 100.050
+    trace.token(TokenEvent(0, "t0", 0.049, 0.001, queue_time=0.030))
+    clock.now = 100.060
+    # Later events never change it.
+    trace.token(TokenEvent(1, "t1", 0.059, 0.001, queue_time=0.5))
+    trace.finish("stop")
+
+    assert recorder.of("first_token") == [
+        ("first_token", "m", pytest.approx(0.050), 0.030)
+    ]
+    timings = recorder.of("finished")[0][5]
+    assert timings.queue == 0.030
+    # Prefill is what the first token took after admission.
+    assert timings.prefill == pytest.approx(0.020)
+
+
 def test_length_counts_as_completed():
     recorder, clock = CapturingRecorder(), Clock()
     trace = make_trace(recorder, clock)

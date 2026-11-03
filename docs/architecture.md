@@ -26,7 +26,7 @@ Keeping them apart lets the response content stay simple and deterministic while
 | Metrics: `/metrics/summary` with sample windows | `metrics/summary.py`, `metrics/window.py` | Done |
 | Load generator: client, closed and open loop, workload, phases, client health, server comparison, sweeps | `bench/`, `config/bench-responses.yml` | Done |
 | Docker images and compose (simulator, benchmark) | `docker/`, `.dockerignore` | Done |
-| `SchedulerEngine` | `simulator/scheduler/` | Planned |
+| `SchedulerEngine` | `simulator/scheduler/` | Done: tiers 1–3 and wiring (`qwen-mock-batched`); step metrics (S5) and validation (S6) next |
 
 ## Layers and dependencies
 
@@ -269,15 +269,23 @@ kv_blocks          = kv_capacity_tokens / block_size
 
 **Each step, in the style of vLLM:**
 
-1. **Admit** waiting requests in arrival order while there are free blocks for the prompt (plus headroom) and fewer than `max_num_sequences` are running. If the head of the queue does not fit, it waits.
-2. **Batch.** Each decoding sequence contributes one token; prefills fill the rest of `max_batch_tokens`.
-3. **Grow.** A decoding sequence needs a new block every `block_size` tokens. If none is free, the newest sequence is preempted: its blocks are freed and it is requeued for recomputation.
-4. **Duration** follows a roofline model: `max(compute, memory) + overhead`, where
-   - `compute = 2 × params × scheduled_tokens / peak_flops`
-   - `memory = (weight_bytes + Σ context_len × kv_bytes_per_token) / bandwidth`
-5. **Emit.** Sleep until the step's absolute deadline, then deliver one token to every decoding sequence.
+1. **Admit** waiting requests in arrival order (preempted ones first) while the whole prompt's blocks fit with a watermark of 1% of all blocks left free, and fewer than `max_num_sequences` are running. If the head of the queue does not fit, it waits. No request is admitted in a step that preempted one.
+2. **Batch.** Running sequences go first, oldest first: a decoding sequence contributes one token, a sequence still in prefill its next chunk. Prefill chunks of newly admitted requests fill the rest of `max_batch_tokens`. Prefill is always chunked, so a prompt longer than the budget spreads over several steps while every other stream keeps decoding.
+3. **Grow.** A sequence needs a new block every `block_size` tokens; growth may use the watermark. If no block is free, the newest admitted sequence is preempted: its blocks are freed and it goes back to the front of the waiting queue, to recompute its prompt and the tokens it already generated.
+4. **Duration** is a roofline scaled by calibrated efficiencies: `max(compute, memory) + step_overhead`, where
+   - `compute = 2 × params × scheduled_tokens / (peak_flops × compute_efficiency)`
+   - `memory = (weight_bytes + Σ context_len × kv_bytes_per_token) / (bandwidth × memory_efficiency)`
+   - `step_overhead` (`latency.step_overhead_ms`) is paid by every step, separately from `FixedRateEngine`'s per-request `scheduler_overhead_ms`. Both efficiencies default to 1.0.
+5. **Emit.** Sleep until the step's absolute deadline, then deliver one token to every sequence whose known tokens are all computed.
 
-The step loop anchors its own clock (each step ends at the previous step's end plus this step's duration). Each request's arrival time is used for its queue latency and TTFT.
+Admission never uses a plan's true length, which a real server cannot know; the length is used only to stop the sequence, like an end-of-sequence token.
+
+**The driver (`driver.py`).** The step loop anchors its own clock: each step ends at the previous step's end plus this step's duration, so a late wake-up shows as `lag` and never shifts the simulated timeline. Anchoring lets the loop fall behind real time, which has two consequences:
+
+- Overdue steps do not sleep, so the loop yields (`await asyncio.sleep(0)`) after every step; otherwise catching up would starve every other coroutine.
+- The next step can start, in simulated time, before a request that has already arrived. Requests therefore wait in an arrival queue and are handed to the policy only once the step clock has reached their arrival, so a request never joins a step that started before it arrived and queue time is never negative.
+
+When the GPU is idle, the next step starts at the next request's arrival, not when the loop notices it, so time spent before the engine runs is absorbed as in `FixedRateEngine`. Each request has its own token queue and the loop never waits for clients; lag is measured when the consumer takes a token. Token 0 carries `queue_time` (first admission − arrival), which feeds the queue and prefill metrics. If the loop fails, every open and later request fails with `EngineFailed` instead of hanging.
 
 **How KV memory shows up in client-visible metrics:**
 
@@ -287,9 +295,11 @@ The step loop anchors its own clock (each step ends at the previous step's end p
 | Blocks run out during decode | Preemption and recomputation | ITL spikes and higher E2E for the preempted sequence |
 | More context in the batch | More bytes read per step | ITL rises for every sequence in the batch |
 
-As an example, with 80 GB of HBM, 3,000 GB/s of bandwidth, 512 KiB of KV per token, 16 GB of weights and 90% memory utilization, KV capacity is about 107,000 tokens (roughly 26 concurrent 4k-context requests). A single short request decodes at about 5.3 ms per token; 26 requests at 4k context each read about 72 GB per step, so ITL rises to about 24 ms. Decode is memory-bound: compute takes well under a millisecond.
+As an example, with 80 GiB of HBM, 3,000 GB/s of bandwidth, 512 KiB of KV per token, a 6.74B-parameter fp16 model (13.48 GB of weights) and 90% memory utilization, KV capacity is 7,609 blocks of 16 tokens, about 121,700 tokens (roughly 29 concurrent 4k-context requests). A single short request decodes at about 4.5 ms per token; 29 requests at 4k context each read about 62 GB of KV per step on top of the weights, so ITL rises to about 25 ms. Decode is memory-bound: compute takes well under a millisecond.
 
-**Configuration the scheduler needs** beyond the README's example: model weight size (parameters and dtype, or `weights_gb`), `peak_tflops`, `block_size` (typically 16) and `gpu_memory_utilization` (typically 0.9).
+**Units.** HBM is in GiB (`hbm_gib`, 2³⁰ bytes), as memory is built and as engines see it; bandwidth (`memory_bandwidth_gbps`) and `peak_tflops` are decimal, as vendors quote them; weights are `parameters_billions × 10⁹ × bytes_per_parameter` bytes.
+
+**Configuration the scheduler needs** beyond `fixed_rate`'s: `peak_tflops` on the hardware profile, a `weights` section (`parameters_billions`, `bytes_per_parameter`, default 2), `kv_cache.block_size` (default 16), `gpu_memory_utilization` (default 0.9) and `watermark` (default 0.01), `latency.step_overhead_ms` (default 0) and an optional `efficiency` section (`compute`, `memory`, default 1.0). `runtime.py` derives the KV capacity, logs it, and refuses to start when `peak_tflops` is missing, the weights leave no room for KV, a full `context_length` does not fit the cache (as vLLM refuses), or `max_batch_tokens < max_num_sequences`.
 
 **Status: designed; next to build.** It was parked until the metrics layer and load generator could measure the existing engines. Both are done, and so is the performance groundwork that gives one process the headroom recorded under Known limits.
 
@@ -298,19 +308,22 @@ As an example, with 80 GB of HBM, 3,000 GB/s of bandwidth, 512 KiB of KV per tok
 ```
 simulator/scheduler/
   __init__.py      exports SchedulerEngine only
-  kv_cache.py      BlockAllocator: capacity in blocks; allocate, grow and free a sequence's blocks
-  cost_model.py    RooflineCostModel: step_duration(batch)
-  policy.py        Scheduler: waiting and running queues, admission, batch building,
-                   preemption; returns a StepPlan for the next step
-  realtime.py      SchedulerEngine(Engine): the asyncio driver; step loop with sleep_until,
+  sequence.py      Sequence: a request's token bookkeeping (known, computed, generated);
+                   one rule covers prefill, chunks, decode and recomputation
+  kv_cache.py      kv_capacity_blocks; BlockAllocator: grow and free a sequence's blocks,
+                   admission against the watermark
+  cost_model.py    RooflineCostModel: step_cost(work) -> StepCost (compute, memory, overhead)
+  policy.py        Scheduler: waiting and running queues; schedule() builds a StepPlan
+                   (decodes, then prefill chunks, then admissions), complete() applies it
+  driver.py        SchedulerEngine(Engine): the asyncio driver; step loop with sleep_until,
                    a queue per request, start/stop, frees blocks when a client disconnects
   virtual.py       later: a discrete-event driver for capacity planning, reusing the same core
 ```
 
-- Dependencies point inward only: `realtime.py` → `policy.py` → `kv_cache.py`, `cost_model.py`.
+- Three tiers, dependencies pointing down only: `driver.py` (time and I/O) → `policy.py` (decisions) → `sequence.py`, `kv_cache.py`, `cost_model.py` (resources and cost, independent of each other).
 - The core is tested step by step with no clock (admission, batching, preemption, KV accounting); only the driver needs the fake clock.
 - The virtual-time mode reuses the policy, allocator and cost model with a different driver, so the two modes cannot drift apart.
-- The driver is `realtime.py` rather than a second `engine.py`, so the interface module and an implementation never share a name.
+- The driver is `driver.py` rather than a second `engine.py`, so the interface module and an implementation never share a name. A virtual-time driver would sit beside it as `virtual.py`.
 
 ## Metrics
 
@@ -459,11 +472,17 @@ How closely one simulator process keeps the engine's timeline under load, measur
 
 ## Open decisions
 
-- **Step-duration model.** Roofline (recommended for `SchedulerEngine`), the empirical rates from the README (kept for `FixedRateEngine`), or roofline scaled by an efficiency factor calibrated against a real measurement.
+None for the first `SchedulerEngine`. Decided on 2026-11-03: roofline × efficiency with a per-step overhead, always-chunked prefill, vLLM-style admission with a 1% watermark, and preemption by recomputation of the newest admitted sequence.
+
+## Future plan
+
+- **Prefix caching** (first extension of the scheduler): blocks hashed by their token content and shared between sequences with reference counts; freed blocks stay cached and are evicted least recently used. Skips prefill of shared prefixes such as system prompts and earlier chat turns, which lowers TTFT and raises effective KV capacity. It needs the prompt's token content, not only its length, to reach the scheduler.
+- **Tensor parallelism**: weights and KV split over N GPUs, multiplying bandwidth and FLOPS by N, plus an all-reduce cost per layer in each step.
+- **Not planned**: request priorities and speculative decoding.
 
 ## Build order
 
 1. Metrics layer: tracing, recorders, Prometheus `/metrics` and `/metrics/summary` are done. The `llmsim-bench` load generator is done (L1–L6).
 2. Performance groundwork: `uvicorn[standard]` (httptools and uvloop) and the regex pre-filter are done; the resulting envelope is recorded under Known limits.
-3. `SchedulerEngine` with KV blocks, admission, preemption and the roofline step model (designed above): next.
+3. `SchedulerEngine` with KV blocks, admission, preemption and the roofline step model: the engine and its wiring are done; per-step metrics and validation with `llmsim-bench` are next.
 4. Transport work on the scheduler's token path, starting with a per-stage breakdown of first-token time.
