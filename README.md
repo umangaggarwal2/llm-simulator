@@ -67,6 +67,32 @@ The images run as an unprivileged user and a single uvicorn worker: metrics are 
 
 # User Manual
 
+The simulator is configured with two files: `models.yml` says **which models** it serves and **how fast** they answer, and `responses.yml` says **what** they answer. Clients talk to it exactly as they would to OpenAI. The sections below cover the API, both files, the load generator and the metrics.
+
+Once the server is running (see Installation), any OpenAI client works with `base_url` pointed at it; no API key is checked:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8080/v1", api_key="not-needed")
+stream = client.chat.completions.create(
+    model="qwen-mock",
+    messages=[{"role": "user", "content": "Tell me about Hamlet"}],
+    stream=True,
+)
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```
+
+or with curl:
+
+```bash
+curl http://localhost:8080/v1/chat/completions -H "Content-Type: application/json" \
+  -d '{"model": "qwen-mock", "messages": [{"role": "user", "content": "Hello"}], "stream": true}'
+```
+
+`GET /v1/models` lists the configured models. The repository's `config/models.yml` has three: `qwen-mock` (fixed timing), `qwen-mock-batched` (the scheduler: latency depends on load) and `tiny-mock` (instant).
+
 # API
 The simulator serves `POST /v1/chat/completions` (streaming and non-streaming) and `GET /v1/models`, so OpenAI's SDKs and other OpenAI clients work unchanged with `base_url` pointed at it. A message's `content` may be a string or an array of text parts (`[{"type": "text", "text": "..."}]`); text parts are joined with no separator. The simulated models are text-only, so image, audio and file parts are rejected with a 400.
 
@@ -126,8 +152,66 @@ The server reads its configuration from these environment variables:
 | `LLM_SIM_SUMMARY_RATE_SECONDS` | `60`: seconds throughput is averaged over |
 
 # Response Configuration
+
+`responses.yml` decides what the simulator says, never when: timing comes only from the model's engine in `models.yml`. The full reference, including validation rules and exactly how a variant is chosen, is [docs/schema.md](docs/schema.md); this section is a guide to writing one.
+
+```yaml
+version: 1
+seed: 42                          # default seed for choosing variants
+
+responses:                        # checked top to bottom; the first match wins
+  - id: greeting
+    match: { exact: ["hi", "hello"] }
+    content: "Hello! How can I help you today?"
+
+  - id: weather
+    match: { regex: "weather in (?P<city>\\w+)" }
+    variants:                     # one is chosen per request, deterministically
+      - "It's sunny in {city} today."
+      - "Expect light rain in {city}."
+
+  - id: echo
+    match: { starts_with: "/echo" }
+    content: "You said: {last_user_message}"
+
+  - id: long-answer
+    match: { contains: "explain" }
+    synthetic: { tokens: [200, 400] }   # filler text of 200 to 400 tokens
+
+default:                          # required: used when nothing matches
+  variants:
+    - "I'm a simulated model ({model})."
+    - "This is a canned response."
 ```
-```
+
+**Matching.** The input is the last `user` message, with surrounding whitespace removed. Each entry has one operator, and matching is case-insensitive:
+
+| Operator | Matches when the input |
+|---|---|
+| `exact` | equals the value |
+| `contains` | contains the value |
+| `starts_with` | starts with the value |
+| `regex` | contains a match for the pattern |
+
+A list of values matches if any of them does. Order matters: put specific entries before general ones, because the first match wins.
+
+**What to answer.** An entry, or `default`, has exactly one of:
+
+- `content`: one fixed answer;
+- `variants`: a list of answers, one chosen per request; each item is a string, or `{ synthetic: ... }`;
+- `synthetic: { tokens: N }` or `{ tokens: [min, max] }`: lorem-ipsum filler of that many tokens, for when only the length matters.
+
+**Templates.** `{last_user_message}` is the user's message as sent; `{model}` is the requested model; a regex's named groups, such as `(?P<city>\w+)` above, become `{city}`. Write `{{` and `}}` for literal braces.
+
+**Determinism.** The same request always gets the same answer, across restarts: the variant, and the length within a synthetic range, come from a hash of the seed, the entry and the input. A request's `seed` parameter overrides the file's `seed`, so a client can ask for a different variant of the same prompt. The request's `max_tokens` (or `max_completion_tokens`) then cuts the answer, with `finish_reason` `length` if it did.
+
+**Checking a file.** The server validates the file at startup and refuses to start with a message naming the entry for an unknown key, a duplicate `id`, a regex that does not compile, or a placeholder that does not exist.
+
+**Tips.**
+
+- For load tests, use `synthetic` answers longer than any `max_tokens` you send, so `max_tokens` sets the output length exactly: that is what [`config/bench-responses.yml`](config/bench-responses.yml) does, and what `llmsim-bench` assumes.
+- A `regex` whose matches must contain a plain word (`\bhamlet\b`) is skipped cheaply when the input lacks it, so many entries stay fast on long prompts. Patterns made only of classes and wildcards (`^.{500,}`) run on every request; put them late.
+- [`config/responses.yml`](config/responses.yml) is a larger example: a conversation about public-domain classics, with 1,000 answers. Point `LLM_SIM_RESPONSES` at your own file to replace it.
 
 # Benchmarking
 `llmsim-bench` sends streaming chat completions to any OpenAI-compatible server and measures them as a client sees them. It needs the `bench` extra:
@@ -276,7 +360,44 @@ Read a sweep for the level where latency breaks away while throughput stops keep
 |                | Batch size                   | Sequences in a scheduling iteration   |
 |                | Scheduled tokens             | Tokens scheduled per iteration        |
 | **Resources**  | KV-cache utilization         | KV capacity consumed                  |
-|                | GPU memory utilization       | Simulated HBM consumption             |
-|                | Compute utilization          | Simulated compute saturation          |
-|                | Memory bandwidth utilization | Simulated bandwidth saturation        |
+|                | GPU memory utilization       | Simulated HBM consumption (planned; KV-cache utilization is the live memory measure today) |
+|                | Compute utilization          | Simulated compute saturation (planned) |
+|                | Memory bandwidth utilization | Simulated bandwidth saturation (planned) |
+
+# Status and roadmap
+
+Version 0.1.0. Until 1.0, the formats of `models.yml` and `responses.yml`, the metric names and the `llmsim-bench` options may still change.
+
+## What works today
+
+- **API**: `POST /v1/chat/completions`, streaming and non-streaming, with usage, `seed`, `max_tokens` and `max_completion_tokens`, text content parts and OpenAI-style errors; `GET /v1/models`. OpenAI's SDKs work unchanged.
+- **Engines**: `instant`, `fixed_rate`, and `scheduler`, which simulates continuous batching on a GPU: a paged KV cache with admission against a watermark, always-chunked prefill, preemption by recomputation, and step times from a roofline model with configurable efficiency and per-step overhead.
+- **Responses**: rule-based, deterministic answers from `responses.yml`, with variants, templates and synthetic text.
+- **Metrics**: Prometheus `/metrics` and an exact-percentile `/metrics/summary`, per request and, for the scheduler, per step (batch, KV usage, preemptions, why requests waited).
+- **Load generator**: `llmsim-bench`, closed and open loop, sweeps, datasets, client health checks and comparison with the server's own measurements.
+- **Deployment**: Docker images and a compose setup for the simulator and benchmarks.
+- **Validation**: each scheduler decision has been checked against a prediction made before running it; step times match the roofline within 0.3% from 1 to 64 streams. Results and method are in [docs/performance-test.md](docs/performance-test.md).
+
+## Known limits
+
+- **Concurrency per process.** Observed per-token timing stays within 5 ms of the simulated timeline up to about 25 concurrent streams with the `scheduler` engine, fewer with short outputs; simulated step times stay exact beyond that. Our own request handling also adds a few milliseconds of queue time while the engine is busy. See "Known limits" in [docs/architecture.md](docs/architecture.md).
+- **Absolute numbers are uncalibrated.** The efficiency settings default to an ideal GPU, so latencies are optimistic until fitted to a measurement of a real server.
+- **Slowness, not failures.** Queueing, preemption stalls and saturation are simulated; errors and dropped connections are not yet.
+- **One process, one simulated GPU per model.** Run several processes for several replicas.
+
+## Planned
+
+Roughly in order of priority:
+
+1. **Failure injection**: configurable error responses (429, 500, 503 with OpenAI-shaped bodies), streams that stop mid-response, and latency spikes, by rate or by rule, so retries, timeouts and circuit breakers can be tested.
+2. **A faster per-token path**: cheaper SSE encoding, per-token metrics and request handling, which measurements suggest would roughly double the concurrency one process serves faithfully. The changes and their expected gains are listed under "Fidelity and performance: the per-token path" in [docs/architecture.md](docs/architecture.md).
+3. **More of the API**: `stop`, `n`, tool calls, `response_format` and logprobs.
+4. **Calibration**: fitting the efficiency and overhead settings to one run against a real server.
+5. **Prefix caching**: shared prompt prefixes such as system prompts skip prefill, as in vLLM and SGLang.
+6. **Resource metrics**: simulated GPU memory, compute and memory-bandwidth utilisation.
+7. **Scale-out**: tensor parallelism in the cost model, several replicas behind a load balancer in compose, and a virtual-time mode for capacity planning beyond what can be streamed in real time.
+
+Not planned: request priorities and speculative decoding.
+
+Contributions and issues are welcome.
 

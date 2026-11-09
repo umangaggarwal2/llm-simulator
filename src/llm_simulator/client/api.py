@@ -3,6 +3,7 @@
 import time
 import uuid
 from contextlib import aclosing, asynccontextmanager
+from importlib import metadata
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Request
@@ -45,6 +46,15 @@ from llm_simulator.runtime import Runtimes, build_runtimes
 from llm_simulator.settings import Settings
 
 
+def package_version() -> str:
+    """The installed package's version, so pyproject.toml is its one source."""
+    try:
+        return metadata.version("llm-simulator")
+    except metadata.PackageNotFoundError:
+        # Running from a source tree that was never installed.
+        return "0+unknown"
+
+
 def create_app(settings: Optional[Settings] = None) -> FastAPI:
     """Build the app from configuration.
 
@@ -85,7 +95,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     app = FastAPI(
         title="LLM Simulator",
-        version="0.1.0",
+        version=package_version(),
         lifespan=lifespan,
         responses={status: {"model": ErrorResponse} for status in (400, 404, 405, 500)},
     )

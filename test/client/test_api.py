@@ -1,11 +1,13 @@
 import dataclasses
 import json
 import time
+from importlib import metadata
 
 import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from llm_simulator.client import api
 from llm_simulator.client.api import create_app
 from llm_simulator.client.dependencies import get_runtimes
 from llm_simulator.llm.models import ModelsConfigError
@@ -469,6 +471,19 @@ def test_summary_windows_come_from_settings(tmp_path):
         ]
     assert (latency["ttft"]["count"], latency["ttft"]["samples"]) == (3, 2)
     assert latency["lag"]["samples"] == 3
+
+
+def test_openapi_reports_the_installed_package_version(client):
+    info = client.get("/openapi.json").json()["info"]
+    assert info["version"] == metadata.version("llm-simulator")
+
+
+def test_version_falls_back_when_the_package_is_not_installed(monkeypatch):
+    def missing(name):
+        raise metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(api.metadata, "version", missing)
+    assert api.package_version() == "0+unknown"
 
 
 def test_metrics_routes_are_not_in_the_openapi_schema(client):
