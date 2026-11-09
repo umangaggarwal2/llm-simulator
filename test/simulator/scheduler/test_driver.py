@@ -49,9 +49,13 @@ COST = RooflineCostModel(
 )
 
 
-def make_engine(clock, num_blocks=1000, budget=4096, max_sequences=8, cost=COST):
+def make_engine(
+    clock, num_blocks=1000, budget=4096, max_sequences=8, cost=COST, on_step=None
+):
     policy = Scheduler(BlockAllocator(num_blocks, 16, 0.0), budget, max_sequences)
-    return SchedulerEngine(policy, cost, clock=clock, sleep=clock.sleep)
+    return SchedulerEngine(
+        policy, cost, on_step=on_step, clock=clock, sleep=clock.sleep
+    )
 
 
 def make_plan(n, prompt_tokens=100):
@@ -269,6 +273,77 @@ async def test_a_request_never_joins_a_step_that_started_before_it_arrived(start
     # Handed to the policy at once, it would join the step the loop was about
     # to schedule, 50 ms before it arrived: a queue time of about -0.05.
     assert 0 <= second[0].queue_time < 0.002
+
+
+# --- Step reports ---
+
+
+async def test_each_step_is_reported_with_its_batch_and_cost(started):
+    clock, steps = FakeClock(), []
+    engine = await started(make_engine(clock, on_step=steps.append))
+    await collect(engine, make_plan(3, prompt_tokens=100), clock.now)
+
+    assert len(steps) == 3
+    prefill, *decodes = steps
+    assert (prefill.prefill_tokens, prefill.decode_tokens) == (100, 0)
+    assert (prefill.sequences, prefill.admitted) == (1, 1)
+    assert prefill.duration == pytest.approx(step((100, 0)))
+    assert [s.decode_tokens for s in decodes] == [1, 1]
+    assert [s.duration for s in decodes] == pytest.approx(
+        [step((1, 100)), step((1, 101))]
+    )
+    assert all(s.bound == "memory" for s in steps)
+    assert all(s.kv_blocks_total == 1000 for s in steps)
+    assert all(s.blocked is None and s.preempted == 0 for s in steps)
+
+
+async def test_the_last_step_reports_the_state_after_it_completed(started):
+    clock, steps = FakeClock(), []
+    engine = await started(make_engine(clock, on_step=steps.append))
+    await collect(engine, make_plan(2), clock.now)
+    # The first step ran with the request; after the last, nothing is left.
+    assert (steps[0].running, steps[0].kv_blocks_used) == (1, 7)
+    last = steps[-1]
+    assert (last.sequences, last.waiting, last.running) == (1, 0, 0)
+    assert last.kv_blocks_used == 0
+
+
+async def test_a_full_batch_reports_waiting_requests_and_why(started):
+    clock, steps = FakeClock(), []
+    engine = await started(make_engine(clock, max_sequences=1, on_step=steps.append))
+    await asyncio.gather(
+        collect(engine, make_plan(2), clock.now),
+        collect(engine, make_plan(2), clock.now),
+    )
+    assert (steps[0].blocked, steps[0].waiting) == ("max_sequences", 1)
+    assert steps[-1].blocked is None
+
+
+async def test_preemption_is_reported_with_the_work_it_threw_away(started):
+    # Two 16-token prompts fill both blocks; the first decode needs a third.
+    clock, steps = FakeClock(), []
+    engine = await started(make_engine(clock, num_blocks=2, on_step=steps.append))
+    await asyncio.gather(
+        collect(engine, make_plan(10, prompt_tokens=16), clock.now),
+        collect(engine, make_plan(10, prompt_tokens=16), clock.now),
+    )
+    preempting = [s for s in steps if s.preempted]
+    assert preempting
+    first = preempting[0]
+    assert (first.preempted, first.preempted_tokens) == (1, 16)
+    assert first.blocked == "preemption"
+    assert sum(s.preempted for s in steps) == len(preempting)
+
+
+async def test_a_failing_listener_stops_the_engine(started):
+    def broken(stats):
+        raise ValueError("bug in a recorder")
+
+    clock = FakeClock()
+    engine = await started(make_engine(clock, on_step=broken))
+    with pytest.raises(EngineFailed) as error:
+        await collect(engine, make_plan(3), clock.now)
+    assert isinstance(error.value.__cause__, ValueError)
 
 
 # --- Lifecycle and failure ---

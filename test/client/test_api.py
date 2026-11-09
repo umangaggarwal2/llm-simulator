@@ -253,7 +253,7 @@ class RecordingEngine(InstantEngine):
 
 
 RECORDING = EngineBuilder(
-    RecordingEngine, lambda deployment, hardware: RecordingEngine()
+    RecordingEngine, lambda deployment, hardware, on_step: RecordingEngine()
 )
 
 

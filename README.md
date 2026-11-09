@@ -234,7 +234,7 @@ Read a sweep for the level where latency breaks away while throughput stops keep
 
 # Metrics
 
-`GET /metrics` exposes the simulator's server-side metrics in Prometheus text format, labelled by `model`: TTFT, inter-token latency, TPOT, E2E, queue, prefill and decode time, request sizes, request and token counters, running requests, and `llm_sim_token_lag_seconds`, which shows how closely the simulator kept to its configured timeline. Times are measured when the engine releases each token. See [docs/architecture.md](docs/architecture.md#metrics) for the full catalogue.
+`GET /metrics` exposes the simulator's server-side metrics in Prometheus text format, labelled by `model`: TTFT, inter-token latency, TPOT, E2E, queue, prefill and decode time, request sizes, request and token counters, running requests, and `llm_sim_token_lag_seconds`, which shows how closely the simulator kept to its configured timeline. Models on the `scheduler` engine also export what each step did: queue and batch sizes, KV-cache usage, preemptions, why admission stopped, step durations and whether each step was compute- or memory-bound (`llm_sim_scheduler_*`, `llm_sim_kv_cache_*`, `llm_sim_preempt*`); `GET /metrics/summary` has the same as a `scheduler` section. Times are measured when the engine releases each token. See [docs/architecture.md](docs/architecture.md#metrics) for the full catalogue.
 
 `GET /metrics/summary` returns the same measurements as JSON with exact percentiles (mean, min, p50, p90, p95, p99, max) over recent traffic: the last 10,000 requests for per-request values and the last 100,000 tokens for ITL and lag, plus throughput over the last 60 s. `POST /metrics/summary/reset` starts a fresh measurement period, for example before a benchmark run.
 

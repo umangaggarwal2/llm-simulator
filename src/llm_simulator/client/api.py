@@ -52,13 +52,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     configuration error stops the server before it accepts any traffic.
     """
     settings = settings or Settings.from_env()
-    runtimes = build_runtimes(
-        load_models(settings.models_path), load_responses(settings.responses_path)
-    )
-    models_created = int(time.time())
+    models = load_models(settings.models_path)
+    # The recorders come first: engines with steps report to them directly.
     descriptions = {
-        name: ModelDescription(runtime.engine.name, runtime.deployment.context_length)
-        for name, runtime in runtimes.items()
+        model.name: ModelDescription(model.engine, model.context_length)
+        for model in models.models
     }
     prometheus = PrometheusRecorder(descriptions)
     summary = SummaryRecorder(
@@ -67,6 +65,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         token_samples=settings.summary_token_samples,
         rate_seconds=settings.summary_rate_seconds,
     )
+    # Request traces and engine steps report once; both stores receive every
+    # measurement.
+    recorder = FanOutRecorder([prometheus, summary])
+    runtimes = build_runtimes(models, load_responses(settings.responses_path), recorder)
+    models_created = int(time.time())
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -87,8 +90,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         responses={status: {"model": ErrorResponse} for status in (400, 404, 405, 500)},
     )
     app.state.runtimes = runtimes
-    # Request traces report once; both stores receive every measurement.
-    app.state.recorder = FanOutRecorder([prometheus, summary])
+    app.state.recorder = recorder
     app.state.prometheus = prometheus
     app.state.summary = summary
     app.add_middleware(ArrivalMiddleware)

@@ -26,7 +26,7 @@ Keeping them apart lets the response content stay simple and deterministic while
 | Metrics: `/metrics/summary` with sample windows | `metrics/summary.py`, `metrics/window.py` | Done |
 | Load generator: client, closed and open loop, workload, phases, client health, server comparison, sweeps | `bench/`, `config/bench-responses.yml` | Done |
 | Docker images and compose (simulator, benchmark) | `docker/`, `.dockerignore` | Done |
-| `SchedulerEngine` | `simulator/scheduler/` | Done: tiers 1–3 and wiring (`qwen-mock-batched`); step metrics (S5) and validation (S6) next |
+| `SchedulerEngine` | `simulator/scheduler/` | Done: tiers 1–3, wiring (`qwen-mock-batched`) and step metrics; validation with `llmsim-bench` (S6) next |
 
 ## Layers and dependencies
 
@@ -328,15 +328,18 @@ simulator/scheduler/
 ## Metrics
 
 ```
- per request (short-lived)        per app (long-lived)                           storage
-┌──────────────────────┐  hooks  ┌───────────────────────┐        ┌────────────────────┐   ┌──────────────────────────────┐
-│ RequestTrace         │ ──────▶ │ MetricsRecorder (ABC) │        │ PrometheusRecorder │──▶│ CollectorRegistry            │──▶ GET /metrics
-│ arrival, first/prev/ │         │  FanOutRecorder ──────┼──┬────▶│                    │   │ counters, gauges, histograms │
-│ last release, count  │         │  NoopRecorder         │  │     └────────────────────┘   └──────────────────────────────┘
-└──────────────────────┘         └───────────────────────┘  │     ┌────────────────────┐   ┌──────────────────────────────┐
-                                                            └────▶│ SummaryRecorder    │──▶│ SampleWindows, RateWindows   │──▶ GET /metrics/summary
-                                                                  └────────────────────┘   └──────────────────────────────┘
+ sources                          per app (long-lived)                           storage
+┌──────────────────────┐  request ┌───────────────────────┐        ┌────────────────────┐   ┌──────────────────────────────┐
+│ RequestTrace         │  hooks   │ MetricsRecorder (ABC) │        │ PrometheusRecorder │──▶│ CollectorRegistry            │──▶ GET /metrics
+│ one per request      │ ───────▶ │  FanOutRecorder ──────┼──┬────▶│                    │   │ counters, gauges, histograms │
+└──────────────────────┘          │  NoopRecorder         │  │     └────────────────────┘   └──────────────────────────────┘
+┌──────────────────────┐  step()  │                       │  │     ┌────────────────────┐   ┌──────────────────────────────┐
+│ SchedulerEngine loop │ ───────▶ │                       │  └────▶│ SummaryRecorder    │──▶│ SampleWindows, RateWindows   │──▶ GET /metrics/summary
+│ one per model        │ StepStats└───────────────────────┘        └────────────────────┘   └──────────────────────────────┘
+└──────────────────────┘
 ```
+
+There are two sources. A `RequestTrace` reports what one request experienced; the scheduler's step loop reports what the engine did, once per step, as a `StepStats` (in `types.py`) passed to an `on_step` callable. `runtime.py` binds that callable to `recorder.step` with the model's name, so the simulator never imports the metrics package. `step()` is a no-op by default: engines whose requests share nothing (`instant`, `fixed_rate`) have no steps to report. Both sources run on the event loop, so the recorders still need no locks.
 
 - **Tracing.** A `RequestTrace` follows one request. It keeps only running state (arrival, the first, previous and last release times, a token count), so its memory is constant however long the completion. It is owned by one request and needs no locking. The engine's event stream is wrapped so that every released token passes through the trace; engines know nothing about metrics.
 - **When values are recorded.** Prompt tokens and `requests_running` when the request starts; TTFT and queue time at the first token; ITL and lag for every token; E2E, TPOT, prefill and decode time, request sizes and `requests_total{finish_reason}` when it ends. Prefill = first release − arrival − queue time; decode = last release − first release.
@@ -360,15 +363,33 @@ simulator/scheduler/
 | Histogram | `llm_sim_inter_token_latency_seconds` | Gap between consecutive tokens |
 | Histogram | `llm_sim_request_time_per_output_token_seconds` | TPOT of completed requests |
 | Histogram | `llm_sim_e2e_request_latency_seconds` | E2E of completed requests |
-| Histogram | `llm_sim_request_queue_time_seconds` | Queue time (0 until the scheduler) |
+| Histogram | `llm_sim_request_queue_time_seconds` | Queue time: first admission − arrival (0 for engines without a queue) |
 | Histogram | `llm_sim_request_prefill_time_seconds`, `llm_sim_request_decode_time_seconds` | Derived as above |
 | Histogram | `llm_sim_request_prompt_tokens`, `llm_sim_request_generation_tokens` | Sizes of completed requests |
 | Histogram | `llm_sim_token_lag_seconds` | Fidelity: how late each token was released |
 | Counter | `llm_sim_requests_total{finish_reason}` | `stop`, `length`, `cancelled`, `error` |
 | Counter | `llm_sim_prompt_tokens_total`, `llm_sim_generation_tokens_total` | Throughput, via `rate()` |
-| Gauge | `llm_sim_requests_running` | Active sequences |
+| Gauge | `llm_sim_requests_running` | Requests in flight, including any waiting in a scheduler's queue |
 | Info | `llm_sim_model_info{engine, context_length}` | Which engine each model runs |
-| Later | `llm_sim_requests_waiting`, `llm_sim_kv_cache_usage_ratio`, `llm_sim_batch_size`, … | Read from the scheduler engine when metrics are scraped |
+
+**Scheduler metrics**, one update per step, exported only by models whose engine reports steps. They follow the step's workflow:
+
+| Stage | Type | Name | Records |
+|---|---|---|---|
+| Admit | Gauge | `llm_sim_scheduler_sequences{state="waiting"\|"running"}` | Queue and batch size after the last step (vLLM's `num_requests_waiting` / `running`) |
+| | Counter | `llm_sim_scheduler_blocked_steps_total{reason}` | Steps that left requests waiting: `kv`, `max_sequences`, `budget`, `preemption` |
+| Batch | Histogram | `llm_sim_scheduler_batch_sequences` | Sequences per step |
+| | Histogram | `llm_sim_scheduler_batch_tokens` | Tokens computed per step: how full the `max_batch_tokens` budget was |
+| | Counter | `llm_sim_scheduler_step_tokens_total{phase="prefill"\|"decode"}` | Tokens computed, by phase; prefill includes recomputation |
+| Grow / preempt | Gauge | `llm_sim_kv_cache_usage_ratio` | Share of KV blocks in use, 0–1 |
+| | Gauge | `llm_sim_kv_cache_blocks` | KV capacity in blocks |
+| | Counter | `llm_sim_preemptions_total` | Sequences preempted |
+| | Counter | `llm_sim_preempted_tokens_total` | KV thrown away by preemption, to be computed again |
+| Duration | Histogram | `llm_sim_scheduler_step_duration_seconds` | Simulated step time, the source of every ITL |
+| | Counter | `llm_sim_scheduler_steps_total{bound="compute"\|"memory"}` | Steps by the limit that set their GPU time |
+| | Counter | `llm_sim_scheduler_busy_seconds_total{part="gpu"\|"overhead"}` | Simulated busy time; `rate()` is the GPU's utilisation |
+
+The gauges hold the state after each step completes, so an idle engine reads 0. Label children are created on a model's first step, so the metrics layer never checks engine names. `/metrics/summary` carries the same data as a `scheduler` section for each such model (steps, busy, overhead and memory-bound fractions, exact step-time and batch percentiles, token totals, waiting and KV usage now and at their maximum, preemptions, blocked steps); a reset clears the totals but keeps the current queue and cache state, from which the maxima start again. `llmsim-bench` prints it as a `scheduler` block after the server comparison.
 
 Names follow vLLM's, with an `llm_sim_` prefix and underscores instead of vLLM's colons, which Prometheus reserves for recording rules. Histogram buckets are spaced logarithmically, with ranges suited to each metric (lag goes down to 10 µs so that timer jitter is visible).
 
@@ -484,5 +505,5 @@ None for the first `SchedulerEngine`. Decided on 2026-11-03: roofline × efficie
 
 1. Metrics layer: tracing, recorders, Prometheus `/metrics` and `/metrics/summary` are done. The `llmsim-bench` load generator is done (L1–L6).
 2. Performance groundwork: `uvicorn[standard]` (httptools and uvloop) and the regex pre-filter are done; the resulting envelope is recorded under Known limits.
-3. `SchedulerEngine` with KV blocks, admission, preemption and the roofline step model: the engine and its wiring are done; per-step metrics and validation with `llmsim-bench` are next.
+3. `SchedulerEngine` with KV blocks, admission, preemption and the roofline step model: the engine, its wiring and its per-step metrics are done; validation with `llmsim-bench` is next.
 4. Transport work on the scheduler's token path, starting with a per-stage breakdown of first-token time.

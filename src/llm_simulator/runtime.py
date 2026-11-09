@@ -5,6 +5,7 @@ configuration and constructs every component. Components themselves take
 plain parameters, so they never depend on the configuration classes.
 """
 
+import functools
 import logging
 from dataclasses import dataclass
 from typing import Callable, Dict, Mapping, Optional, Type
@@ -21,6 +22,7 @@ from llm_simulator.llm.models import (
 )
 from llm_simulator.llm.responses import ResponsesConfig
 from llm_simulator.llm.tokenizer import Tokenizer, get_tokenizer
+from llm_simulator.metrics import MetricsRecorder
 from llm_simulator.simulator import (
     Engine,
     FixedRateEngine,
@@ -33,6 +35,7 @@ from llm_simulator.simulator.scheduler.kv_cache import (
     kv_capacity_blocks,
 )
 from llm_simulator.simulator.scheduler.policy import Scheduler
+from llm_simulator.types import StepListener
 
 logger = logging.getLogger(__name__)
 
@@ -54,12 +57,18 @@ Runtimes = Mapping[str, ModelRuntime]
 class EngineBuilder:
     engine: Type[Engine]
     # Called only after the engine's required sections are known to be
-    # present, with the model's hardware profile when it references one.
-    build: Callable[[ModelDeployment, Optional[HardwareProfile]], Engine]
+    # present, with the model's hardware profile when it references one, and
+    # the listener for its steps when metrics are recorded. Engines without
+    # steps ignore the listener.
+    build: Callable[
+        [ModelDeployment, Optional[HardwareProfile], Optional[StepListener]], Engine
+    ]
 
 
 def _fixed_rate(
-    deployment: ModelDeployment, hardware: Optional[HardwareProfile]
+    deployment: ModelDeployment,
+    hardware: Optional[HardwareProfile],
+    on_step: Optional[StepListener],
 ) -> Engine:
     latency = deployment.latency
     return FixedRateEngine(
@@ -128,30 +137,45 @@ def _scheduler_parts(
     return SchedulerParts(policy, cost)
 
 
-def _scheduler(deployment: ModelDeployment, hardware: HardwareProfile) -> Engine:
+def _scheduler(
+    deployment: ModelDeployment,
+    hardware: HardwareProfile,
+    on_step: Optional[StepListener],
+) -> Engine:
     parts = _scheduler_parts(deployment, hardware)
-    return SchedulerEngine(parts.policy, parts.cost)
+    return SchedulerEngine(parts.policy, parts.cost, on_step=on_step)
 
 
 ENGINES: Dict[str, EngineBuilder] = {
     InstantEngine.name: EngineBuilder(
-        InstantEngine, lambda deployment, hardware: InstantEngine()
+        InstantEngine, lambda deployment, hardware, on_step: InstantEngine()
     ),
     FixedRateEngine.name: EngineBuilder(FixedRateEngine, _fixed_rate),
     SchedulerEngine.name: EngineBuilder(SchedulerEngine, _scheduler),
 }
 
 
-def build_runtimes(models: ModelsConfig, responses: ResponsesConfig) -> Runtimes:
+def build_runtimes(
+    models: ModelsConfig,
+    responses: ResponsesConfig,
+    recorder: Optional[MetricsRecorder] = None,
+) -> Runtimes:
     """Build one runtime per model, raising ModelsConfigError for unusable entries.
 
     All models share one Matcher, so the response rules are compiled once.
+    Engines with steps report each one to recorder, labelled with the model's
+    name; request metrics are recorded by the API, not here.
     """
     matcher = Matcher(responses)
     runtimes = {}
     for deployment in models.models:
         tokenizer = _build_tokenizer(deployment)
-        engine = _build_engine(deployment, models.hardware_for(deployment))
+        on_step = (
+            None
+            if recorder is None
+            else functools.partial(recorder.step, deployment.name)
+        )
+        engine = _build_engine(deployment, models.hardware_for(deployment), on_step)
         runtimes[deployment.name] = ModelRuntime(
             deployment=deployment,
             tokenizer=tokenizer,
@@ -173,7 +197,9 @@ def _build_tokenizer(deployment: ModelDeployment) -> Tokenizer:
 
 
 def _build_engine(
-    deployment: ModelDeployment, hardware: Optional[HardwareProfile]
+    deployment: ModelDeployment,
+    hardware: Optional[HardwareProfile],
+    on_step: Optional[StepListener],
 ) -> Engine:
     builder = ENGINES.get(deployment.engine)
     if builder is None:
@@ -195,6 +221,6 @@ def _build_engine(
         )
 
     try:
-        return builder.build(deployment, hardware)
+        return builder.build(deployment, hardware, on_step)
     except ValueError as exc:
         raise ModelsConfigError(f"model '{deployment.name}': engine: {exc}") from None

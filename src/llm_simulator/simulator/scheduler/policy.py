@@ -110,6 +110,11 @@ class Scheduler:
     def running(self) -> int:
         return len(self._running)
 
+    @property
+    def kv(self) -> BlockAllocator:
+        """The cache, for reading its state; only the scheduler changes it."""
+        return self._kv
+
     def has_work(self) -> bool:
         return bool(self._sequences)
 

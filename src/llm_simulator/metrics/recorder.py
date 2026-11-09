@@ -4,9 +4,14 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
+from llm_simulator.types import StepStats
+
 # Every way a request can end: it ran to a stop or its token limit, the
 # client went away, or the engine failed.
 FINISH_REASONS = ("stop", "length", "cancelled", "error")
+
+# Why a scheduler step left requests waiting (StepStats.blocked).
+BLOCK_REASONS = ("kv", "max_sequences", "budget", "preemption")
 
 
 @dataclass(frozen=True)
@@ -35,11 +40,11 @@ class RequestTimings:
 
 
 class MetricsRecorder(ABC):
-    """Receives measurements from request traces.
+    """Receives measurements from request traces and engine steps.
 
-    Calls arrive from the event loop, one request at a time per trace.
-    Implementations decide how to store them; the trace never touches a
-    metrics library directly.
+    Calls arrive from the event loop: one request at a time per trace, and
+    one step at a time from each scheduler engine's loop. Implementations
+    decide how to store them; neither source touches a metrics library.
     """
 
     @abstractmethod
@@ -64,6 +69,9 @@ class MetricsRecorder(ABC):
         timings: Optional[RequestTimings],
     ) -> None:
         """A request ended. timings is None unless it completed (stop or length)."""
+
+    def step(self, model: str, stats: StepStats) -> None:
+        """A scheduler step finished. Engines without steps never call this."""
 
 
 class NoopRecorder(MetricsRecorder):
@@ -113,3 +121,7 @@ class FanOutRecorder(MetricsRecorder):
             recorder.request_finished(
                 model, finish_reason, prompt_tokens, generation_tokens, timings
             )
+
+    def step(self, model, stats):
+        for recorder in self._recorders:
+            recorder.step(model, stats)

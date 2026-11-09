@@ -92,6 +92,9 @@ def format_result(result: BenchResult) -> str:
         lines.append(_row(f"  {key}", [_tokens(stats[c]) for c in TOKEN_COLUMNS]))
     if server is not None:
         lines += [""] + _comparison(result)
+    scheduler = _scheduler_section(result)
+    if scheduler is not None:
+        lines += [""] + _scheduler(scheduler)
 
     warnings = _warnings(result)
     if warnings:
@@ -192,6 +195,49 @@ def _comparison(result: BenchResult) -> List[str]:
     )
     lines.append("* client percentile − server percentile")
     return lines
+
+
+def _scheduler_section(result: BenchResult) -> Optional[Dict[str, Any]]:
+    """The target's scheduler section, when it runs a scheduler engine."""
+    summary = result.run.server
+    if summary is None or not summary.available or summary.model is None:
+        return None
+    section = summary.model.get("scheduler")
+    return section if isinstance(section, dict) else None
+
+
+def _scheduler(section: Dict[str, Any]) -> List[str]:
+    """What the target's scheduler did during the run, from its summary."""
+    if not section["steps"]:
+        return ["scheduler   no steps in the measured window"]
+    batch = section["batch_sequences"]
+    preemptions = section["preemptions"]
+    lines = [
+        f"scheduler   {section['steps']:,} steps"
+        f" · GPU busy {_percent(section['busy_fraction'])}"
+        f" ({_percent(section['memory_bound_fraction'])} memory-bound,"
+        f" overhead {_percent(section['overhead_fraction'])})"
+        f" · batch mean {batch['mean']:.1f} / max {batch['max']:.0f}",
+        f"            KV max {_percent(section['kv_cache']['usage_max'])}"
+        f" of {section['kv_cache']['blocks']:,} blocks"
+        f" · waiting max {section['waiting']['max']:,}"
+        f" · preemptions {preemptions['count']:,}"
+        f" ({preemptions['tokens']:,} tokens to recompute)",
+    ]
+    blocked = [
+        f"{reason} {count:,}"
+        for reason, count in section["blocked_steps"].items()
+        if count
+    ]
+    if blocked:
+        lines.append(
+            f"            steps leaving requests waiting: {', '.join(blocked)}"
+        )
+    return lines
+
+
+def _percent(value: Optional[float]) -> str:
+    return "–" if value is None else f"{value:.0%}"
 
 
 def _server_json(result: BenchResult) -> Optional[Dict[str, Any]]:

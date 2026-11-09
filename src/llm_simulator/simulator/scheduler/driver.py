@@ -11,9 +11,9 @@ from typing import AsyncIterator, Dict, List, Optional, Tuple
 
 from llm_simulator.simulator._timing import Clock, Sleep, sleep_until
 from llm_simulator.simulator.engine import Engine
-from llm_simulator.simulator.scheduler.cost_model import RooflineCostModel
-from llm_simulator.simulator.scheduler.policy import Scheduler
-from llm_simulator.types import GenerationPlan, TokenEvent
+from llm_simulator.simulator.scheduler.cost_model import RooflineCostModel, StepCost
+from llm_simulator.simulator.scheduler.policy import Scheduler, StepPlan
+from llm_simulator.types import GenerationPlan, StepListener, StepStats, TokenEvent
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,9 @@ class SchedulerEngine(Engine):
 
     The loop never waits for clients: each request has its own queue, as a
     GPU does not slow down for a slow reader.
+
+    After each step, on_step receives its StepStats, for metrics. A listener
+    that raises stops the engine like any other failure of the loop.
     """
 
     name = "scheduler"
@@ -67,11 +70,13 @@ class SchedulerEngine(Engine):
         policy: Scheduler,
         cost: RooflineCostModel,
         *,
+        on_step: Optional[StepListener] = None,
         clock: Clock = time.monotonic,
         sleep: Sleep = asyncio.sleep,
     ):
         self._policy = policy
         self._cost = cost
+        self._on_step = on_step
         self._clock = clock
         self._sleep = sleep
         self._ids = itertools.count()
@@ -165,7 +170,8 @@ class SchedulerEngine(Engine):
                 # The policy's invariants make this impossible; fail loudly
                 # rather than spin.
                 raise RuntimeError("the scheduler planned an empty step")
-            end += self._cost.step_cost(plan.shape).duration
+            cost = self._cost.step_cost(plan.shape)
+            end += cost.duration
             await sleep_until(end, self._clock, self._sleep)
             # Overdue steps do not sleep at all; yield so a loop catching up
             # never starves the rest of the server.
@@ -181,6 +187,29 @@ class SchedulerEngine(Engine):
                 )
             for seq in result.finished:
                 self._streams[seq.id].queue.put_nowait(_DONE)
+            if self._on_step is not None:
+                self._on_step(self._stats(plan, cost))
+
+    def _stats(self, plan: StepPlan, cost: StepCost) -> StepStats:
+        kv = self._policy.kv
+        return StepStats(
+            duration=cost.duration,
+            compute=cost.compute,
+            memory=cost.memory,
+            overhead=cost.overhead,
+            sequences=len(plan.work),
+            prefill_tokens=plan.prefill_tokens,
+            decode_tokens=plan.decode_tokens,
+            admitted=len(plan.admitted),
+            preempted=len(plan.preempted),
+            preempted_tokens=sum(p.discarded for p in plan.preempted),
+            blocked=plan.blocked,
+            # After complete(): the state the next step starts from.
+            waiting=self._policy.waiting,
+            running=self._policy.running,
+            kv_blocks_used=kv.used_blocks,
+            kv_blocks_total=kv.num_blocks,
+        )
 
     def _drop_closed_arrivals(self) -> None:
         while self._arrivals and self._arrivals[0][2].closed:

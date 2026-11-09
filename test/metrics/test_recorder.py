@@ -1,4 +1,10 @@
-from llm_simulator.metrics import FanOutRecorder, MetricsRecorder, RequestTimings
+from llm_simulator.metrics import (
+    FanOutRecorder,
+    MetricsRecorder,
+    NoopRecorder,
+    RequestTimings,
+)
+from llm_simulator.types import StepStats
 
 TIMINGS = RequestTimings(e2e=0.02, queue=0.0, prefill=0.01, decode=0.01, tpot=0.01)
 
@@ -32,6 +38,9 @@ class CapturingRecorder(MetricsRecorder):
             )
         )
 
+    def step(self, model, stats):
+        self.log.append((self.name, "step", model, stats))
+
 
 def test_fan_out_forwards_every_call_to_every_recorder_in_order():
     log = []
@@ -50,3 +59,34 @@ def test_fan_out_forwards_every_call_to_every_recorder_in_order():
         ("a", "finished", "m", "stop", 8, 1, TIMINGS),
         ("b", "finished", "m", "stop", 8, 1, TIMINGS),
     ]
+
+
+STATS = StepStats(
+    duration=0.005,
+    compute=0.001,
+    memory=0.005,
+    overhead=0.0,
+    sequences=1,
+    prefill_tokens=0,
+    decode_tokens=1,
+    admitted=0,
+    preempted=0,
+    preempted_tokens=0,
+    blocked=None,
+    waiting=0,
+    running=1,
+    kv_blocks_used=1,
+    kv_blocks_total=10,
+)
+
+
+def test_fan_out_forwards_steps():
+    log = []
+    fan_out = FanOutRecorder([CapturingRecorder("a", log), CapturingRecorder("b", log)])
+    fan_out.step("m", STATS)
+    assert log == [("a", "step", "m", STATS), ("b", "step", "m", STATS)]
+
+
+def test_step_is_optional_for_recorders():
+    # Recorders that only handle requests need not implement step.
+    NoopRecorder().step("m", STATS)

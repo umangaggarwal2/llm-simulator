@@ -17,12 +17,14 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from llm_simulator.metrics.recorder import (
+    BLOCK_REASONS,
     FINISH_REASONS,
     MetricsRecorder,
     ModelDescription,
     RequestTimings,
 )
 from llm_simulator.metrics.window import RateWindow, SampleWindow, describe
+from llm_simulator.types import StepStats
 
 # Order of the latency_seconds section of the summary.
 LATENCIES = (
@@ -50,6 +52,27 @@ class WindowSnapshot:
 
 
 @dataclass(frozen=True)
+class SchedulerSnapshot:
+    steps: int
+    memory_bound: int
+    gpu_seconds: float
+    overhead_seconds: float
+    prefill_tokens: int
+    decode_tokens: int
+    preemptions: int
+    preempted_tokens: int
+    blocked: Dict[str, int]
+    waiting: int
+    waiting_max: int
+    kv_blocks_used: int
+    kv_blocks_used_max: int
+    kv_blocks_total: int
+    durations: WindowSnapshot
+    batch_tokens: WindowSnapshot
+    batch_sequences: WindowSnapshot
+
+
+@dataclass(frozen=True)
 class ModelSnapshot:
     engine: Optional[str]
     running: int
@@ -61,12 +84,94 @@ class ModelSnapshot:
     token_rate: Tuple[float, float]
     latencies: Dict[str, WindowSnapshot]
     sizes: Dict[str, WindowSnapshot]
+    # None for engines without steps.
+    scheduler: Optional[SchedulerSnapshot] = None
 
 
 @dataclass(frozen=True)
 class SummarySnapshot:
     since_reset: float
     models: Dict[str, ModelSnapshot]
+
+
+def _copy(window: SampleWindow) -> WindowSnapshot:
+    return WindowSnapshot(window.snapshot(), window.count)
+
+
+class _SchedulerState:
+    """A scheduler model's step measurements since the last reset."""
+
+    def __init__(self, samples: int, first: StepStats):
+        self.durations = SampleWindow(samples)
+        self.batch_tokens = SampleWindow(samples)
+        self.batch_sequences = SampleWindow(samples)
+        self._current(first)
+        self.clear()
+
+    def _current(self, stats: StepStats) -> None:
+        self.waiting = stats.waiting
+        self.kv_blocks_used = stats.kv_blocks_used
+        self.kv_blocks_total = stats.kv_blocks_total
+
+    def clear(self) -> None:
+        """Clear the period's totals and windows.
+
+        The current queue and cache state survive, like requests running,
+        and the maxima start again from them: a reset while the cache is
+        full must not report that it was empty.
+        """
+        self.steps = 0
+        self.memory_bound = 0
+        self.gpu_seconds = 0.0
+        self.overhead_seconds = 0.0
+        self.prefill_tokens = 0
+        self.decode_tokens = 0
+        self.preemptions = 0
+        self.preempted_tokens = 0
+        self.blocked = dict.fromkeys(BLOCK_REASONS, 0)
+        self.waiting_max = self.waiting
+        self.kv_blocks_used_max = self.kv_blocks_used
+        for window in (self.durations, self.batch_tokens, self.batch_sequences):
+            window.clear()
+
+    def add(self, stats: StepStats) -> None:
+        self.steps += 1
+        self.memory_bound += stats.bound == "memory"
+        self.gpu_seconds += max(stats.compute, stats.memory)
+        self.overhead_seconds += stats.overhead
+        self.prefill_tokens += stats.prefill_tokens
+        self.decode_tokens += stats.decode_tokens
+        self.preemptions += stats.preempted
+        self.preempted_tokens += stats.preempted_tokens
+        if stats.blocked is not None:
+            self.blocked[stats.blocked] += 1
+        self._current(stats)
+        self.waiting_max = max(self.waiting_max, stats.waiting)
+        self.kv_blocks_used_max = max(self.kv_blocks_used_max, stats.kv_blocks_used)
+        self.durations.add(stats.duration)
+        self.batch_tokens.add(stats.prefill_tokens + stats.decode_tokens)
+        self.batch_sequences.add(stats.sequences)
+
+    def snapshot(self) -> SchedulerSnapshot:
+        return SchedulerSnapshot(
+            steps=self.steps,
+            memory_bound=self.memory_bound,
+            gpu_seconds=self.gpu_seconds,
+            overhead_seconds=self.overhead_seconds,
+            prefill_tokens=self.prefill_tokens,
+            decode_tokens=self.decode_tokens,
+            preemptions=self.preemptions,
+            preempted_tokens=self.preempted_tokens,
+            blocked=dict(self.blocked),
+            waiting=self.waiting,
+            waiting_max=self.waiting_max,
+            kv_blocks_used=self.kv_blocks_used,
+            kv_blocks_used_max=self.kv_blocks_used_max,
+            kv_blocks_total=self.kv_blocks_total,
+            durations=_copy(self.durations),
+            batch_tokens=_copy(self.batch_tokens),
+            batch_sequences=_copy(self.batch_sequences),
+        )
 
 
 class _ModelState:
@@ -97,6 +202,9 @@ class _ModelState:
         self.generation_size = SampleWindow(request_samples)
         self.request_rate = RateWindow(rate_seconds, clock)
         self.token_rate = RateWindow(rate_seconds, clock)
+        # Created by the first step, so engines without steps have none.
+        self.scheduler: Optional[_SchedulerState] = None
+        self._step_samples = token_samples
         self.clear()
 
     def latencies(self) -> Dict[str, SampleWindow]:
@@ -113,13 +221,19 @@ class _ModelState:
             window.clear()
         self.request_rate.clear()
         self.token_rate.clear()
+        if self.scheduler is not None:
+            self.scheduler.clear()
+
+    def step(self, stats: StepStats) -> None:
+        if self.scheduler is None:
+            # Steps come about as often as tokens, so they share the
+            # token window's capacity.
+            self.scheduler = _SchedulerState(self._step_samples, stats)
+        self.scheduler.add(stats)
 
     def snapshot(self, now: float) -> ModelSnapshot:
         def copy(windows):
-            return {
-                name: WindowSnapshot(window.snapshot(), window.count)
-                for name, window in windows.items()
-            }
+            return {name: _copy(window) for name, window in windows.items()}
 
         return ModelSnapshot(
             engine=self.engine,
@@ -131,6 +245,7 @@ class _ModelState:
             token_rate=self.token_rate.rate(now),
             latencies=copy(self.latencies()),
             sizes=copy(self.sizes()),
+            scheduler=None if self.scheduler is None else self.scheduler.snapshot(),
         )
 
 
@@ -219,6 +334,9 @@ class SummaryRecorder(MetricsRecorder):
         state.prompt_size.add(prompt_tokens)
         state.generation_size.add(generation_tokens)
 
+    def step(self, model: str, stats: StepStats) -> None:
+        self._state(model).step(stats)
+
     def reset(self) -> None:
         """Start a fresh measurement period.
 
@@ -269,4 +387,40 @@ def summarize(snapshot: SummarySnapshot) -> Dict[str, Any]:
             "latency_seconds": stats(model.latencies),
             "tokens_per_request": stats(model.sizes),
         }
+        if model.scheduler is not None:
+            models[name]["scheduler"] = _scheduler(
+                model.scheduler, snapshot.since_reset
+            )
     return {"since_reset_seconds": snapshot.since_reset, "models": models}
+
+
+def _scheduler(s: SchedulerSnapshot, since_reset: float) -> Dict[str, Any]:
+    """The scheduler section: what the steps did since the reset."""
+    busy = s.gpu_seconds + s.overhead_seconds
+
+    def ratio(part, whole):
+        return part / whole if whole else None
+
+    def window(snapshot):
+        return describe(snapshot.values, snapshot.count)
+
+    return {
+        "steps": s.steps,
+        # Simulated GPU time over the period's wall time; near 1, the GPU
+        # had no idle time left.
+        "busy_fraction": ratio(busy, since_reset),
+        "overhead_fraction": ratio(s.overhead_seconds, busy),
+        "memory_bound_fraction": ratio(s.memory_bound, s.steps),
+        "step_seconds": window(s.durations),
+        "batch_tokens": window(s.batch_tokens),
+        "batch_sequences": window(s.batch_sequences),
+        "tokens": {"prefill": s.prefill_tokens, "decode": s.decode_tokens},
+        "waiting": {"now": s.waiting, "max": s.waiting_max},
+        "kv_cache": {
+            "blocks": s.kv_blocks_total,
+            "usage": s.kv_blocks_used / s.kv_blocks_total,
+            "usage_max": s.kv_blocks_used_max / s.kv_blocks_total,
+        },
+        "preemptions": {"count": s.preemptions, "tokens": s.preempted_tokens},
+        "blocked_steps": s.blocked,
+    }

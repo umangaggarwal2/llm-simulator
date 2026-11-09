@@ -6,6 +6,7 @@ from llm_simulator.metrics import (
     SummaryRecorder,
     summarize,
 )
+from llm_simulator.types import StepStats
 
 MODELS = {
     "qwen-mock": ModelDescription("fixed_rate", 32768),
@@ -235,3 +236,91 @@ def test_simulated_windows_cover_completed_requests_only():
     assert latency["ttft_simulated"]["count"] == 1
     assert latency["ttft_simulated"]["p50"] == 0.010
     assert latency["e2e_simulated"]["max"] == 0.800
+
+
+# --- Scheduler steps ---
+
+
+def make_stats(**overrides):
+    stats = dict(
+        duration=0.006,
+        compute=0.001,
+        memory=0.005,
+        overhead=0.001,
+        sequences=2,
+        prefill_tokens=100,
+        decode_tokens=2,
+        admitted=1,
+        preempted=0,
+        preempted_tokens=0,
+        blocked=None,
+        waiting=3,
+        running=2,
+        kv_blocks_used=40,
+        kv_blocks_total=100,
+    )
+    stats.update(overrides)
+    return StepStats(**stats)
+
+
+def test_no_scheduler_section_without_steps():
+    body = summary(make_recorder())
+    assert all("scheduler" not in model for model in body["models"].values())
+
+
+def test_scheduler_section_after_steps():
+    clock = Clock(100.0)
+    recorder = make_recorder(clock)
+    recorder.step("qwen-mock", make_stats())
+    recorder.step(
+        "qwen-mock",
+        make_stats(
+            compute=0.008,
+            duration=0.009,
+            sequences=4,
+            preempted=1,
+            preempted_tokens=500,
+            blocked="preemption",
+            waiting=1,
+            kv_blocks_used=90,
+        ),
+    )
+    clock.now = 100.1
+    section = summary(recorder)["models"]["qwen-mock"]["scheduler"]
+    assert "scheduler" not in summary(recorder)["models"]["tiny-mock"]
+
+    assert section["steps"] == 2
+    # GPU 0.005 + 0.008, overhead 0.002, over 0.1 s.
+    assert section["busy_fraction"] == pytest.approx(0.15)
+    assert section["overhead_fraction"] == pytest.approx(0.002 / 0.015)
+    assert section["memory_bound_fraction"] == 0.5
+    assert section["step_seconds"]["count"] == 2
+    assert section["step_seconds"]["max"] == pytest.approx(0.009)
+    assert section["batch_tokens"]["mean"] == 102
+    assert section["batch_sequences"]["max"] == 4
+    assert section["tokens"] == {"prefill": 200, "decode": 4}
+    assert section["waiting"] == {"now": 1, "max": 3}
+    assert section["kv_cache"] == {"blocks": 100, "usage": 0.9, "usage_max": 0.9}
+    assert section["preemptions"] == {"count": 1, "tokens": 500}
+    assert section["blocked_steps"] == {
+        "kv": 0,
+        "max_sequences": 0,
+        "budget": 0,
+        "preemption": 1,
+    }
+
+
+def test_reset_clears_totals_but_keeps_the_current_state():
+    recorder = make_recorder()
+    recorder.step("qwen-mock", make_stats(waiting=8, kv_blocks_used=95))
+    recorder.step("qwen-mock", make_stats(waiting=5, kv_blocks_used=70))
+    recorder.reset()
+    section = summary(recorder)["models"]["qwen-mock"]["scheduler"]
+    assert section["steps"] == 0
+    assert section["step_seconds"]["count"] == 0
+    assert section["tokens"] == {"prefill": 0, "decode": 0}
+    assert section["busy_fraction"] is None and section["memory_bound_fraction"] is None
+    # Still 5 waiting and 70% full: the maxima start again from there.
+    assert section["waiting"] == {"now": 5, "max": 5}
+    assert section["kv_cache"]["usage"] == 0.7
+    assert section["kv_cache"]["usage_max"] == 0.7

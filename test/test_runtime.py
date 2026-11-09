@@ -6,6 +6,7 @@ from llm_simulator.llm.tokenizer import RegexTokenizer
 from llm_simulator import runtime as runtime_module
 from llm_simulator.runtime import EngineBuilder, _scheduler_parts, build_runtimes
 from llm_simulator.simulator import FixedRateEngine, InstantEngine
+from llm_simulator.metrics import NoopRecorder
 from llm_simulator.types import GenerationRequest, Message
 
 RESPONSES = ResponsesConfig.model_validate(
@@ -71,7 +72,7 @@ def test_engine_required_sections_are_enforced(monkeypatch):
         runtime_module.ENGINES,
         NeedsPerformance.name,
         EngineBuilder(
-            NeedsPerformance, lambda deployment, hardware: NeedsPerformance()
+            NeedsPerformance, lambda deployment, hardware, on_step: NeedsPerformance()
         ),
     )
     with pytest.raises(
@@ -225,3 +226,36 @@ def test_scheduler_context_length_must_fit_the_cache():
 def test_scheduler_batch_must_hold_a_decode_per_sequence():
     with pytest.raises(ValueError, match="max_batch_tokens"):
         scheduler_parts(scheduler={"max_batch_tokens": 32, "max_num_sequences": 64})
+
+
+class StepLog(NoopRecorder):
+    def __init__(self):
+        self.steps = []
+
+    def step(self, model, stats):
+        self.steps.append((model, stats))
+
+
+def test_scheduler_steps_reach_the_recorder_with_the_models_name():
+    config = ModelsConfig.model_validate(
+        {
+            "version": 1,
+            "hardware": {"h100": H100},
+            "models": [{**SCHEDULED, "name": "batched", "engine": "scheduler"}],
+        }
+    )
+    recorder = StepLog()
+    engine = build_runtimes(config, RESPONSES, recorder)["batched"].engine
+    engine._on_step("stats")
+    assert recorder.steps == [("batched", "stats")]
+
+
+def test_without_a_recorder_steps_are_not_reported():
+    config = ModelsConfig.model_validate(
+        {
+            "version": 1,
+            "hardware": {"h100": H100},
+            "models": [{**SCHEDULED, "engine": "scheduler"}],
+        }
+    )
+    assert build_runtimes(config, RESPONSES)["m"].engine._on_step is None

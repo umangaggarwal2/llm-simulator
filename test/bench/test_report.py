@@ -305,3 +305,61 @@ def test_sweep_json():
     assert data["levels"][0]["value"] == 1
     assert data["levels"][0]["result"]["requests"]["ok"] == 1
     assert data["levels"][1] == {"value": 8, "error": "boom"}
+
+
+def scheduler_section(**overrides):
+    section = {
+        "steps": 12840,
+        "busy_fraction": 0.97,
+        "overhead_fraction": 0.0,
+        "memory_bound_fraction": 0.91,
+        "batch_sequences": {"mean": 41.2, "max": 64},
+        "kv_cache": {"blocks": 7609, "usage": 0.1, "usage_max": 0.99},
+        "waiting": {"now": 0, "max": 57},
+        "preemptions": {"count": 14, "tokens": 36211},
+        "blocked_steps": {
+            "kv": 220,
+            "max_sequences": 0,
+            "budget": 18,
+            "preemption": 14,
+        },
+    }
+    section.update(overrides)
+    return section
+
+
+def scheduler_lines(scheduler):
+    model = {**section(), "scheduler": scheduler}
+    text = format_result(
+        result([record(0)], server=ServerSummary(URL, True, model=model))
+    )
+    lines = text.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("scheduler"))
+    return lines[start : start + 3]
+
+
+def test_scheduler_block():
+    assert scheduler_lines(scheduler_section()) == [
+        "scheduler   12,840 steps · GPU busy 97% (91% memory-bound, overhead 0%)"
+        " · batch mean 41.2 / max 64",
+        "            KV max 99% of 7,609 blocks · waiting max 57"
+        " · preemptions 14 (36,211 tokens to recompute)",
+        "            steps leaving requests waiting: kv 220, budget 18, preemption 14",
+    ]
+
+
+def test_scheduler_block_without_blocked_steps_or_steps():
+    lines = scheduler_lines(
+        scheduler_section(blocked_steps={"kv": 0, "max_sequences": 0})
+    )
+    assert not lines[-1].startswith("            steps leaving")
+    assert scheduler_lines(scheduler_section(steps=0)) == [
+        "scheduler   no steps in the measured window"
+    ]
+
+
+def test_no_scheduler_block_for_other_engines():
+    text = format_result(
+        result([record(0)], server=ServerSummary(URL, True, model=section()))
+    )
+    assert not any(line.startswith("scheduler") for line in text.splitlines())

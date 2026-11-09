@@ -5,7 +5,7 @@ packages can both depend on it without depending on each other.
 """
 
 from dataclasses import dataclass
-from typing import Literal, Optional, Tuple
+from typing import Callable, Literal, Optional, Tuple
 
 FinishReason = Literal["stop", "length"]
 
@@ -63,3 +63,42 @@ class TokenEvent:
     # Simulated seconds the request waited before an engine with a waiting
     # queue admitted it. Set on token 0 only, and only by such engines.
     queue_time: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class StepStats:
+    """One scheduler step, reported after its tokens were released.
+
+    The batch fields describe the step as it ran. waiting, running and the
+    KV fields are the state after it completed, so the step before the engine
+    goes idle leaves them at 0 rather than at its batch's values.
+    """
+
+    # Simulated seconds: max(compute, memory) + overhead.
+    duration: float
+    compute: float
+    memory: float
+    overhead: float
+    sequences: int
+    prefill_tokens: int
+    decode_tokens: int
+    admitted: int
+    preempted: int
+    # Tokens whose KV preemption threw away, to be computed again.
+    preempted_tokens: int
+    # Why requests were left waiting: "kv", "max_sequences", "budget" or
+    # "preemption"; None when none were.
+    blocked: Optional[str]
+    waiting: int
+    running: int
+    kv_blocks_used: int
+    kv_blocks_total: int
+
+    @property
+    def bound(self) -> str:
+        """Which limit set the step's GPU time: "compute" or "memory"."""
+        return "compute" if self.compute > self.memory else "memory"
+
+
+# Receives every step of one engine; runtime.py binds the model's name.
+StepListener = Callable[[StepStats], None]
