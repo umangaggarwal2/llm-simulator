@@ -74,15 +74,7 @@ def synthetic(
     drawn from random.Random(f"{seed}:{i}"), so runs are repeatable; distinct
     prompts keep a real server's prefix cache from flattering TTFT.
     """
-    # Tokens with one word; every further word adds exactly one.
-    base = tokenizer.count_messages([Message("user", prefix + WORDS[0])])
-    if input_tokens < base:
-        raise ValueError(
-            f"input_tokens {input_tokens} is less than {base}: the chat overhead"
-            + (" and the prefix" if prefix else "")
-            + " plus one word"
-        )
-    words = input_tokens - base + 1
+    words = _words_for(input_tokens, prefix, tokenizer)
 
     def make(index: int) -> RequestSpec:
         rng = random.Random(f"{seed}:{index}")
@@ -96,17 +88,46 @@ def synthetic(
     )
 
 
-def from_jsonl(path: Path, max_tokens: int, prefix: str = "") -> Workload:
+def _words_for(input_tokens: int, prefix: str, tokenizer: Tokenizer) -> int:
+    """How many words make a prompt of exactly input_tokens prompt tokens."""
+    # Tokens with one word; every further word adds exactly one.
+    base = tokenizer.count_messages([Message("user", prefix + WORDS[0])])
+    if input_tokens < base:
+        raise ValueError(
+            f"input_tokens {input_tokens} is less than {base}: the chat overhead"
+            + (" and the prefix" if prefix else "")
+            + " plus one word"
+        )
+    return input_tokens - base + 1
+
+
+def from_jsonl(
+    path: Path,
+    max_tokens: int,
+    prefix: str = "",
+    *,
+    seed: int = 0,
+    tokenizer: Tokenizer = RegexTokenizer(),
+) -> Workload:
     """Prompts from a JSONL file, cycled when there are fewer than requests.
 
-    Each non-blank line is {"prompt": str, "max_tokens": int (optional,
-    default max_tokens)}. The whole file is checked before the run starts.
+    Each non-blank line is {"prompt": str} or {"input_tokens": int}, with an
+    optional "max_tokens" (default max_tokens). input_tokens makes a synthetic
+    prompt of exactly that many prompt tokens, as --input-tokens does, so one
+    file can mix prompt lengths; its words are seeded by seed and the line
+    number, so a file gives the same prompts every run. The whole file is
+    checked before the run starts.
     """
     specs: List[RequestSpec] = []
     with open(path, encoding="utf-8") as lines:
         for number, line in enumerate(lines, start=1):
             if line.strip():
-                specs.append(_parse_line(line, max_tokens, prefix, f"{path}:{number}"))
+                rng = random.Random(f"{seed}:line {number}")
+                specs.append(
+                    _parse_line(
+                        line, max_tokens, prefix, f"{path}:{number}", rng, tokenizer
+                    )
+                )
     if not specs:
         raise ValueError(f"{path}: no prompts")
     return Workload(
@@ -119,21 +140,45 @@ def from_jsonl(path: Path, max_tokens: int, prefix: str = "") -> Workload:
     )
 
 
-def _parse_line(line: str, max_tokens: int, prefix: str, where: str) -> RequestSpec:
+def _parse_line(
+    line: str,
+    max_tokens: int,
+    prefix: str,
+    where: str,
+    rng: random.Random,
+    tokenizer: Tokenizer,
+) -> RequestSpec:
     try:
         entry = json.loads(line)
     except ValueError as exc:
         raise ValueError(f"{where}: invalid JSON: {exc}") from None
     if not isinstance(entry, dict):
         raise ValueError(f"{where}: expected an object")
-    prompt = entry.get("prompt")
-    if not isinstance(prompt, str) or not prompt:
-        raise ValueError(f"{where}: missing 'prompt'")
     tokens = entry.get("max_tokens", max_tokens)
-    # bool is an int in Python; true is not a token count.
-    if not isinstance(tokens, int) or isinstance(tokens, bool) or tokens < 1:
+    if not _positive_int(tokens):
         raise ValueError(f"{where}: 'max_tokens' must be a positive integer")
+
+    if ("prompt" in entry) == ("input_tokens" in entry):
+        raise ValueError(f"{where}: needs exactly one of 'prompt' and 'input_tokens'")
+    if "input_tokens" in entry:
+        input_tokens = entry["input_tokens"]
+        if not _positive_int(input_tokens):
+            raise ValueError(f"{where}: 'input_tokens' must be a positive integer")
+        try:
+            words = _words_for(input_tokens, prefix, tokenizer)
+        except ValueError as exc:
+            raise ValueError(f"{where}: {exc}") from None
+        return RequestSpec(prefix + " ".join(rng.choices(WORDS, k=words)), tokens)
+
+    prompt = entry["prompt"]
+    if not isinstance(prompt, str) or not prompt:
+        raise ValueError(f"{where}: 'prompt' must be a non-empty string")
     return RequestSpec(prefix + prompt, tokens)
+
+
+def _positive_int(value) -> bool:
+    # bool is an int in Python; true is not a token count.
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
 
 
 def _describe(source: str, output: str, prefix: str) -> str:

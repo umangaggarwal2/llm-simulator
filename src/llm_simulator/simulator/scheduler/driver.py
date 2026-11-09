@@ -172,7 +172,7 @@ class SchedulerEngine(Engine):
                 raise RuntimeError("the scheduler planned an empty step")
             cost = self._cost.step_cost(plan.shape)
             end += cost.duration
-            await sleep_until(end, self._clock, self._sleep)
+            step_lag = await sleep_until(end, self._clock, self._sleep)
             # Overdue steps do not sleep at all; yield so a loop catching up
             # never starves the rest of the server.
             await asyncio.sleep(0)
@@ -188,9 +188,9 @@ class SchedulerEngine(Engine):
             for seq in result.finished:
                 self._streams[seq.id].queue.put_nowait(_DONE)
             if self._on_step is not None:
-                self._on_step(self._stats(plan, cost))
+                self._on_step(self._stats(plan, cost, step_lag))
 
-    def _stats(self, plan: StepPlan, cost: StepCost) -> StepStats:
+    def _stats(self, plan: StepPlan, cost: StepCost, lag: float) -> StepStats:
         kv = self._policy.kv
         return StepStats(
             duration=cost.duration,
@@ -209,6 +209,7 @@ class SchedulerEngine(Engine):
             running=self._policy.running,
             kv_blocks_used=kv.used_blocks,
             kv_blocks_total=kv.num_blocks,
+            lag=lag,
         )
 
     def _drop_closed_arrivals(self) -> None:

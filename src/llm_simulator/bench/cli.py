@@ -204,7 +204,9 @@ def build_workload(config: BenchConfig) -> Workload:
             config.input_tokens, config.max_tokens, prefix=prefix, seed=config.seed
         )
     if config.dataset is not None:
-        return workloads.from_jsonl(config.dataset, config.max_tokens, prefix)
+        return workloads.from_jsonl(
+            config.dataset, config.max_tokens, prefix, seed=config.seed
+        )
     return workloads.fixed(config.prompt, config.max_tokens, prefix)
 
 

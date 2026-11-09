@@ -488,9 +488,222 @@ How closely one simulator process keeps the engine's timeline under load, measur
   - **TPOT:** 3.94 ms at the median
 
   Before the regex pre-filter, the same run collapsed at about 60 req/s.
+- **The scheduler's envelope is much smaller.** A step releases a token to every sequence at once, and our process delivers them one after another, so the limit is set by batch size and per-request work rather than throughput. On the workload above (512-token prompts, 64 output tokens), lag p99 stays under 5 ms up to about 25 requests per second (a batch of about 10) against about 200 for `fixed_rate`; with 200-token outputs, up to about 25 concurrent streams (E0 and E7 under "Scheduler validation"). Our request processing also adds 3.5–5 ms of simulated queue time while the engine is busy, and at saturation it bunches admissions, which lowered capacity by 9% in E7.
 - **How to read results past the envelope.** Lag measures the process, not the model. The `fidelity` line and the server comparison flag it. An engine with a capacity model, such as `SchedulerEngine`, gives meaningful results only while its simulated output rate stays inside this envelope. Beyond it, run more processes as more replicas, or use the planned virtual-time mode.
-- **Not yet attributed.** Where the first-token time goes stage by stage has not been measured. Per-token transport costs (Pydantic SSE chunks, per-token metrics, the send chain) are the candidates for raising the envelope, and are deferred until after the scheduler, whose step loop changes the per-token path.
+- **Attribution.** The per-token cost on the scheduler's path has been measured stage by stage (E0 under "Scheduler validation"); the improvements it points to are listed under "Fidelity and performance: the per-token path". First-token time on `fixed_rate` has not been broken down by stage.
 
+## Scheduler validation
+
+The strategy, the method, the full list of experiments and their status are in [performance-test.md](performance-test.md); this section records the results. Each experiment checks one scheduler decision against a prediction made before running it. Models come from `config/validation/models.yml`, where each variant differs from `base` (= `qwen-mock-batched`) in one field; the server runs with `config/bench-responses.yml`, so `--max-tokens` sets output lengths exactly.
+
+### E0: where token lag comes from
+
+Before trusting per-token results at high concurrency, the lag was split into its two parts: the step loop waking late (`step_lag_seconds`) and tokens waiting to be delivered after release (token lag − step lag). Closed loop, 1,000-token prompts, 200 output tokens, 192 requests per level, client and server on one machine (2026-11-09):
+
+| concurrency | batch | step p50 | token lag p50 / p99 | step lag p50 / p99 | delivery p50 |
+|---|---|---|---|---|---|
+| 1 | 1.0 | 4.69 ms | 0.83 / 1.66 ms | 0.52 / 1.24 ms | 0.31 ms |
+| 8 | 7.9 | 6.03 ms | 1.78 / 3.22 ms | 1.00 / 1.95 ms | 0.78 ms |
+| 32 | 31.7 | 10.66 ms | 3.95 / 7.16 ms | 2.27 / 3.99 ms | 1.68 ms |
+| 64 | 62.4 | 16.82 ms | 6.20 / 11.06 ms | 3.62 / 6.37 ms | 2.58 ms |
+
+**Finding: lag grows with batch size, not with throughput.** Token lag p99 rises by about 0.15 ms per sequence in the batch, at only 3,100 output tokens per second at 64 streams, a quarter of what `fixed_rate` sustains with lag p99 under 5 ms. The cause is the shape of the work: `fixed_rate` spreads each request's tokens over its own timeline, while a step releases one token to every sequence at the same instant. Each token costs about 90 µs of event-loop CPU on this path (measured below; `fixed_rate`'s path is cheaper, with no step loop or queue handoff), so the batch's writes queue behind each other. Tokens late in that queue show it as delivery lag, and the step loop itself wakes late by about the same work, about 50 µs per sequence, because its timer fires only once those writes are done. The 0.5 ms at batch 1 is timer granularity.
+
+**What it means.** Simulated values are unaffected: the timeline is anchored, so step times, `sim_time`, and the simulated TTFT and E2E in the summary are exact at every level, and observed ITL p50 matches the simulated step time (16.72 vs 16.82 ms at 64). What lag adds is noise on the observed per-token times, about 0.15 ms × batch size at p99. With the usual bar of lag p99 under 5 ms, observed per-token timings are faithful up to about 25 concurrent streams per process; beyond that, compare simulated values, or read observed ITL percentiles knowing they carry up to about 0.15 ms per stream of delivery jitter. Real engines have the same burst (vLLM's API server also delivers a step's tokens together), but its cost belongs to their process, not to the simulated model.
+
+**Where the time goes.** The same load (64 streams, 30 s) profiled with py-spy in non-blocking `--gil` mode, checked against two independent measurements: process CPU from `/proc` (88.8–90.7 µs per token) and timers around the step loop inside the running server (13.4 µs per token). The profile agrees with both (90.3 and 12.8 µs). An earlier profile in py-spy's default blocking mode did not: pausing the process for every sample inflated CPU per token to 150 µs and doubled the step loop's share, so only non-blocking profiles are used here.
+
+| Stage | µs per token | Share | Inside it |
+|---|---|---|---|
+| SSE chunk (`client/sse.py`) | 21.5 | 24% | Pydantic: `model_dump_json` 10, building the chunk models 5; the generator and f-string 6 |
+| uvicorn `send` | 15.4 | 17% | Almost all in `send` itself, mostly the socket write in C |
+| Trace and per-token metrics | 14.8 | 16% | Two `prometheus_client` histogram observations (ITL, lag) about 7; trace bookkeeping 5; summary windows 2 |
+| Step loop (policy, cost, queue handoff) | 12.8 | 14% | `schedule` 5, `complete` 3.6, `put_nowait` 3.5 per sequence; 1.75 µs per sequence when measured hot in isolation, so cold caches between steps cost about 3× |
+| Starlette `StreamingResponse` | 5.4 | 6% | |
+| uvloop internals (C) | 5.0 | 6% | Callback dispatch, polling, timers |
+| Engine stream (`driver.run`) | 4.9 | 5% | Queue get, `TokenEvent` |
+| Per-request work | 4.8 (964 µs per request) | 5% | Parsing, validation, handler setup; the generator runs in a worker thread (about 0.8 ms per request) |
+| asyncio scheduling | 4.0 | 4% | Task switches and wake-ups |
+| Step metrics | 1.7 | 2% | |
+| **Total** | **90** | | |
+
+Garbage collection is not a significant cost: about 52 ms over the 30 s run (87, 8 and 1 collections of generations 0, 1 and 2). The one full collection took 13.7 ms, which accounts for the largest lag outliers.
+
+The projection for the transport work follows from the table. Chunk templates (SSE from about 22 to about 3 µs) and lighter per-token metrics (about 15 to about 7) would bring the total from about 90 to about 60 µs; bypassing `StreamingResponse` and trimming the step loop perhaps to about 50. The socket write, uvloop and the task switch per token, about 25–30 µs together, remain. Lag p99 would roughly halve, so observed timings would stay within 5 ms up to about 40–50 streams rather than about 25: a real gain, but not the 3–4× that an earlier, unmeasured estimate suggested.
+
+**Consequence for the build order.** This is the first measurement that ties the per-token transport cost to a fidelity limit the scheduler hits in practice: halving the cost per token roughly halves lag at a given batch size. It strengthens the case for the transport work planned after the scheduler.
+
+### E6: the overhead and efficiency settings are exact
+
+Checked first, because if the configuration knobs do not do exactly what they claim, no other result is worth reading. One stream, 128-token prompts, 200 output tokens, 30 requests per model (6,000 steps each), on `base`, `overhead-1ms` (`step_overhead_ms: 1`) and `memory-eff-80` (`efficiency.memory: 0.8`).
+
+```
+llmsim-bench --model <model> --base-url http://localhost:8093/v1 --concurrency 1 \
+  --requests 30 --input-tokens 128 --max-tokens 200 --output results/validation/e6-<model>.json
+```
+
+**Prediction**, from the cost model before running: one prefill step of (128, 0), then decode steps of (1, 128) to (1, 326), all memory-bound. Overhead adds exactly 1 ms to every step; 80% memory efficiency multiplies the memory time by 1.25.
+
+| Model | Step p50 predicted / simulated | Simulated TTFT p50 | Simulated E2E p50 | Observed ITL p50 | Verdict |
+|---|---|---|---|---|---|
+| `base` | 4.5331 / 4.5331 ms | 4.5157 ms (exact) | 906.62 ms (exact) | 4.671 ms (+0.14) | Pass |
+| `overhead-1ms` | 5.5331 / 5.5331 ms | 5.5157 ms (exact) | 1,106.62 ms (exact) | 5.665 ms (+0.13) | Pass |
+| `memory-eff-80` | 5.6664 / 5.6664 ms | 5.6446 ms (exact) | 1,133.27 ms (exact) | 5.758 ms (+0.09) | Pass |
+
+Pass criteria were simulated values within 0.5% and observed ITL p50 within 0.3 ms. Simulated values match to the summary's precision (under 0.001%): the overhead adds exactly 1.000 ms per step and 200 ms per request, and the efficiency exactly ×1.25 on a memory-bound step. Observed ITL p50 sits 0.09–0.14 ms above the step time at batch 1, consistent with E0's lag at batch 1 (timer granularity), and lag p99 was 1.7 ms in all three runs.
+
+
+### E1: batching is nearly free
+
+A closed-loop concurrency sweep on `base`: 1 to 64 streams, 128-token prompts, 200 output tokens, 20 s per level.
+
+```
+llmsim-bench --model base --base-url http://localhost:8093/v1 --concurrency 1,2,4,8,16,32,64 \
+  --duration 20 --input-tokens 128 --max-tokens 200 --output results/validation/e1.json
+```
+
+**Prediction.** Every step reads the weights once plus each sequence's KV; with contexts spread evenly over 129–327 tokens (mean 228), step ≈ (13.48 GB + B × 228 × 512 KiB) ÷ 3,000 GB/s, memory-bound throughout, and output throughput ≈ B ÷ step less about 0.5% for client turnaround.
+
+| Streams | Step p50 predicted / simulated | Output tok/s predicted / measured | Batch | Memory-bound | Sim TTFT p50 | Step max |
+|---|---|---|---|---|---|---|
+| 1 | 4.533 / 4.533 ms | 219 / 220 | 1.0 | 100% | 4.5 ms | 4.6 ms |
+| 2 | 4.573 / 4.572 ms | 435 / 434 | 2.0 | 100% | 10.0 ms | 4.6 ms |
+| 4 | 4.653 / 4.652 ms | 855 / 852 | 4.0 | 100% | 10.0 ms | 5.3 ms |
+| 8 | 4.812 / 4.812 ms | 1,654 / 1,638 | 7.9 | 99% | 13.6 ms | 12.2 ms |
+| 16 | 5.131 / 5.134 ms | 3,103 / 3,046 | 15.8 | 99% | 20.8 ms | 22.7 ms |
+| 32 | 5.768 / 5.776 ms | 5,520 / 5,294 | 31.3 | 99% | 44.6 ms | 45.4 ms |
+| 64 | 7.043 / 7.064 ms | 9,041 / 8,391 | 61.9 | 99% | 100.7 ms | 82.2 ms |
+
+**Verdict: pass.** Step p50 is within 0.3% at every level, no step was blocked by KV, the batch or the budget, and nothing was preempted. Batching works as the roofline says: 64 streams get 38× the throughput of one for 1.56× the step time.
+
+**What the prediction missed: phase-locking.** TTFT and the largest steps grow with concurrency, which the steady-state prediction did not include. Every request has the same length and the loop is closed, so streams that start together finish together and send their next requests together; they never spread out. About every 200 steps, one step prefills most of the batch's new prompts at once: fully synchronised, that is B × 128 tokens, compute-bound at B × 1.75 ms. The observed step maximum is 74–88% of that at every level (12.2, 22.7, 45.4 and 82.2 ms at 8, 16, 32 and 64 streams), so the streams stay mostly in step, loosened only by client timing. Requests arriving during that step wait for it (queue p50 34 ms at 64) and then share their own prefill step (prefill p50 71 ms), which makes up the simulated TTFT of about 100 ms; the compute-bound steps take about 6% of GPU time, which is the 7% throughput shortfall at 64. This is correct behaviour for the workload, and a real engine under the same benchmark would phase-lock too. It suggests that fixed-length closed-loop benchmarks overstate TTFT compared with traffic whose lengths or arrival times vary, but the explanation is so far inferred from these numbers, not isolated. **Pending: E1b**, a control at 64 streams that breaks the synchronisation and changes nothing else, once with output lengths spread over 100–300 tokens (closed loop) and once with Poisson arrivals at about 40 requests per second (fixed lengths). If phase-locking is the cause, both should bring simulated TTFT p50 down to about 10–15 ms, the step maximum well below 82 ms and throughput to within about 2% of the prediction.
+
+### E2: context slows every stream
+
+32 streams on `base`, 256 output tokens, prompts of 128, 512, 1,024 and 2,048 tokens, 20 s each.
+
+```
+llmsim-bench --model base --base-url http://localhost:8093/v1 --concurrency 32 --duration 20 \
+  --input-tokens <prompt> --max-tokens 256 --output results/validation/e2-<prompt>.json
+```
+
+**Prediction.** A decode step reads the weights plus 32 contexts averaging prompt + 128 tokens: step ≈ (13.48 GB + 32 × (prompt + 128) × 512 KiB) ÷ 3,000 GB/s, memory-bound. KV at full growth stays under capacity at every level (at most 73,728 of 121,744 tokens), so no KV blocking or preemption. As in E1 the streams phase-lock; from 512-token prompts up, 32 prompts arriving together exceed the 8,192-token budget, so admission is expected to wait on `budget` and the largest step to be one full prefill chunk, 111.7 ms.
+
+| Prompt | Step p50 predicted / simulated | KV max predicted / measured | Step max | Blocked | Observed ITL p50 | Verdict |
+|---|---|---|---|---|---|---|
+| 128 | 5.925 / 5.924 ms | 10% / 10% | 52.4 ms | — | 6.00 ms | Pass |
+| 512 | 8.072 / 8.081 ms | 20% / 20% | 111.7 ms | budget 5 | 8.06 ms | Pass |
+| 1,024 | 10.936 / 10.950 ms | 34% / 34% | 111.7 ms | budget 6 | 10.96 ms | Pass |
+| 2,048 | 16.662 / 16.683 ms | 61% / 61% | 111.7 ms | budget 7 | 16.71 ms | Pass |
+
+**Verdict: pass.** Step p50 is within 0.13% at every length; 96–99% of steps are memory-bound (the rest are the prefill chunks); no KV blocking and no preemption. Every other prediction holds: KV usage at its maximum, `budget` waits from 512 tokens and not at 128 (32 × 128 = 4,096 tokens fits the budget), and a largest step of exactly 111.7 ms. Context is the dominant cost of decoding: 16× the prompt length makes every stream's step 2.8× slower at the same batch size. Observed ITL p50 is within 0.1 ms of the simulated step at 32 streams, with lag p99 of 5.0–8.7 ms as E0 predicts at this batch size; simulated TTFT is 58–218 ms, from the same phase-locking as E1.
+
+### E3: chunked prefill trades spike height for spread
+
+Two `llmsim-bench` processes against one server, so each reports its own percentiles: 16 steady decoders (128-token prompts, 1,000 output tokens, 30 s, reading the server summary) and, starting 3 s later, one stream of 8,192-token prompts with 1 output token (25 s, `--no-server-metrics`). On `base` (budget 8,192) and `budget-2048`.
+
+```
+llmsim-bench --model <model> --base-url http://localhost:8093/v1 --concurrency 16 --duration 30 \
+  --input-tokens 128 --max-tokens 1000 --output results/validation/e3-<model>-decoders.json &
+llmsim-bench --model <model> --base-url http://localhost:8093/v1 --concurrency 1 --duration 25 \
+  --input-tokens 8192 --max-tokens 1 --no-server-metrics --output results/validation/e3-<model>-long.json
+```
+
+**Prediction**, computed step by step with the cost model (16 decoders at a mid-life context of about 628 tokens): with budget 8,192 a long prompt takes 2 steps, the first 111.7 ms; with 2,048 it takes 5 steps of at most 27.9 ms. The prefill work is the same either way, so the long prompt's prefill takes 119.3 ms with both. All 16 decoders are in every step, so the longest step is the decoders' longest ITL.
+
+| | Budget 8,192 | Budget 2,048 |
+|---|---|---|
+| Longest step (decoders' ITL max), predicted / simulated | 111.7 / 111.7 ms | 27.9 / 27.9 ms |
+| Decoders' observed ITL p50 / p99 / max | 6.27 / 112.7 / 115.7 ms | 6.31 / 30.5 / 36.4 ms |
+| Long prompts' observed TTFT p50 / p99 | 138.5 / 147.6 ms | 138.5 / 149.4 ms |
+| Long prompts served in 25 s | 178 | 178 |
+| Decode tokens in the measured window | 63,936 | 63,936 |
+
+**Verdict: pass.** The longest step is exactly as predicted for both budgets, and the long prompts' TTFT ratio is 1.000 (criterion: 1.0–1.15). A smaller budget lowers the spike every decoding stream sees by 4× and spreads it over more steps, at no cost in TTFT or throughput: the same prompts and the same decode tokens were served in the same time. This is the trade-off behind vLLM's `max_num_batched_tokens`.
+
+**What the prediction missed: our request processing shows up as queue time while the engine is busy.** Long prompts' TTFT was 138.5 ms against a predicted prefill of 119.3 ms. In simulated time it is queue (p50 about 13 ms) plus prefill (p50 about 122 ms, within 2.3% of the prediction; the rest is the decoders' actual contexts). The queue time is our own work: arrival is stamped before the 53 KB body is read and validated and before the generator runs (2.3 ms for this prompt), and only then is the request handed to the engine, which adds it at the next step boundary. An idle engine absorbs that time, because it starts at the arrival; a busy one cannot add a request to a step already running, so the processing time, rounded up to a step boundary, becomes simulated queue time. Inferred from these numbers rather than isolated; it is the measured effect on TTFT of the per-request item T5 under "Fidelity and performance: the per-token path".
+
+### E4: admission waits for KV space
+
+`small-kv` (1,260 blocks of 16 tokens, a watermark of 12 blocks), 32 streams, 2,000-token prompts, 200 output tokens, 40 s.
+
+```
+llmsim-bench --model small-kv --base-url http://localhost:8093/v1 --concurrency 32 --duration 40 \
+  --input-tokens 2000 --max-tokens 200 --output results/validation/e4.json
+```
+
+**Prediction**, from the block arithmetic and the cost model. A 2,000-token prompt needs 125 blocks; with 9 running, 135 are free, and a tenth would leave 10, below the watermark, so at most 9 run. Fully grown, a request holds ⌈2,199 ÷ 16⌉ = 138 blocks and 9 × 138 = 1,242 ≤ 1,260, so nothing is ever preempted. In steady state, admission is blocked by `kv` whenever anyone waits. A decode step with 9 contexts of about 2,100 tokens takes 7.8 ms; a step carrying one new prompt is compute-bound at 27.4 ms; 9 ÷ 200 = 4.5% of steps carry a prompt, so the mean step is 8.7 ms, about 115 steps per second, 1,040 output tokens and 5.2 requests per second. With about 23 waiting, Little's law gives a queue time of 23 ÷ 5.2 ≈ 4.4 s.
+
+| | Predicted | Measured |
+|---|---|---|
+| Running at most | 9 | 9 (batch mean 8.84) |
+| Preemptions | 0 | 0 |
+| Blocked reason | `kv` whenever anyone waits | `kv` on 4,999 of 5,201 steps; no other reason |
+| Waiting at most | 23 | 23 |
+| KV usage at its peak | 1,242 of 1,260 blocks, 98.6% | 98.6% |
+| Decode step p50 | 7.8 ms | 7.79 ms |
+| Mean step | 8.7 ms | 8.83 ms (+1.5%) |
+| Queue time p50 | 4.4 s | 4.46 s (+1.4%) |
+| Throughput | 5.2 requests/s, 1,040 tokens/s | 5.01 requests/s, 1,001 tokens/s (−3.7%) |
+
+**Verdict: pass** (criteria: running at most 9, no preemption, `kv` the dominant blocked reason, queue time within 15%). The KV cache, not the batch limit of 64 or the token budget, decides how many run: TTFT is almost all queueing (4.46 s of 4.57 s), the cost a real server pays when long prompts fill its cache.
+
+**What the prediction missed.** It assumed requests enter one at a time as others finish, each with a 27.4 ms prefill step. They enter in groups instead: requests admitted together finish together and free their blocks together, the phase-locking of E1, so four are admitted at once and their 8,000 prompt tokens fill one 111.7 ms step (prefill p50 112 ms). The total prefill compute is the same, which is why the mean step and the throughput still land within 2–4% of the prediction.
+
+### E5: preemption, and what the watermark changes
+
+`small-kv` (watermark 1%) and `small-kv-no-watermark`: exactly 64 requests at once, one per stream, with no warm-up, 200-token prompts and 2,000 output tokens each, run until all finish. The chunk timeout is raised to 120 s because preempted requests can wait a long time between tokens.
+
+```
+llmsim-bench --model <model> --base-url http://localhost:8093/v1 --concurrency 64 --requests 64 \
+  --warmup 0 --timeout 120 --input-tokens 200 --max-tokens 2000 --output results/validation/e5-<model>.json
+```
+
+**Prediction, in two parts.** By hand: all 64 are admitted (13 blocks each, 832 in all), but growing together they pass 1,260 blocks about 105 tokens into their output, and fully grown they would need 8,832, so both variants must preempt; each preemption throws away between 200 and about 2,200 tokens. For exact numbers, the pure scheduler core (`Scheduler` and `RooflineCostModel`, no server, no clock) was run in virtual time on the same 64 requests arriving at t = 0. That tests whether the driver, the server and the bench reproduce what the scheduler's rules dictate under heavy preemption; whether the rules themselves are right is the unit tests' job.
+
+| | `small-kv`, predicted / measured | `small-kv-no-watermark`, predicted / measured |
+|---|---|---|
+| Requests completed | 64 / 64 | 64 / 64 |
+| Preemptions | 129 / 131 (+1.6%) | 148 / 144 (−2.7%) |
+| Tokens thrown away | 95,114 / 96,322 (+1.3%) | 106,835 / 103,903 (−2.7%) |
+| Tokens per preemption | 737 / 735 | 722 / 722 |
+| Batch mean | 15.35 / 15.38 | 15.37 / 15.39 |
+| Last request finished (simulated) | 65.45 / 65.34 s | 65.55 / 65.40 s |
+| E2E p50 (simulated) | 37.6 / 37.7 s | 37.7 / 37.8 s |
+
+**Verdict: pass** (criteria: preemptions and thrown-away tokens within 15% of the virtual prediction, the watermark variant lower, tokens per preemption within the hand bounds, batch mean and finish time within 5%). Everything lands within 3%; the remaining difference is arrival order, since the bench's 64 requests arrive a few milliseconds apart rather than together, which changes who is newest at each preemption. KV usage peaked at 100% in both; admission waited on `kv` in about 6,150 steps and on `preemption` in the step after each eviction.
+
+**The watermark** cut preemptions by 9% (13% in the virtual run) and the recomputed tokens with them, at no cost in time: recomputation is prefill, which is cheap while the GPU is memory-bound.
+
+**What the prediction understated: how long a victim stalls.** The largest ITL was 50 s, against a predicted "seconds". A preempted request goes to the front of the queue but returns only when enough blocks are free, and the oldest requests hold the cache until they finish, which can take most of a request's lifetime. So while the median ITL is 7.9 ms, a few streams freeze for tens of seconds. This is what recompute preemption under heavy oversubscription costs, the same in vLLM's policy, and the case a gateway's or client's timeouts should be tested against.
+
+### E7: the scheduler's fidelity envelope
+
+An open-loop sweep on `base` at 10, 25, 50, 75 and 100 requests per second (Poisson arrivals; actually 10.0, 26.5, 53.3, 77.9 and 103.3), 512-token prompts and 64 output tokens, 30 s per rate: the workload of the `fixed_rate` envelope under Known limits.
+
+```
+llmsim-bench --model base --base-url http://localhost:8093/v1 --rate 10,25,50,75,100 --duration 30 \
+  --timeout 120 --input-tokens 512 --max-tokens 64 --output results/validation/e7.json
+```
+
+**Prediction.** The simulated side from the pure scheduler core in virtual time, fed Poisson arrivals at the rates actually offered; the agreement can only be statistical, since the arrivals are different draws. Saturation is set by `max_num_sequences`: at a full batch of 64 a request takes about 0.75 s, so capacity is about 82 requests per second. Lag from E0's formula, 1.7 ms + 0.15 ms per sequence in the batch.
+
+| Rate | Batch, virtual / real | Step p50, virtual / real | Sim TTFT p50, virtual / real | Queue p50, virtual / real | Lag p99, E0 formula / measured | Step lag p99 |
+|---|---|---|---|---|---|---|
+| 10.0 | 3.3 / 3.3 | 4.78 / 4.79 ms | 9.8 / 13.2 ms | 2.6 / 6.1 ms | 2.2 / 2.9 ms | 1.7 ms |
+| 26.5 | 9.2 / 9.6 | 5.35 / 5.44 ms | 10.5 / 14.1 ms | 2.9 / 6.7 ms | 3.1 / 5.0 ms | 2.6 ms |
+| 53.3 | 25.4 / 26.0 | 7.16 / 7.21 ms | 12.9 / 18.0 ms | 3.6 / 8.4 ms | 5.6 / 8.3 ms | 4.2 ms |
+| 77.9 | 57.7 / 59.2 | 10.57 / 10.58 ms | 168 / 957 ms | 151 / 937 ms | 10.6 / 18.9 ms | 8.0 ms |
+| 103.3 | 64 / 62.5 | 10.61 / 10.59 ms | 5.6 / 6.0 s | 5.6 / 6.0 s | 11.1 / 35.6 ms | 35.2 ms |
+
+Measured throughput levelled off at 74 requests per second at both 77.9 and 103.3, with admission blocked by `max_sequences`; no KV blocking (KV peaked at 29%) and no preemption. `busy_fraction` stayed at 0.94–1.00, so the step loop kept up with simulated time at every rate: the ceiling is in the simulated timeline, not our process running behind.
+
+**Verdict: partial.** Scheduling matches: batch within 4% and step p50 within 1.7% at every rate, and saturation comes from `max_num_sequences` as predicted. Two results fail, and both trace to our own process rather than the scheduler's rules:
+
+- **TTFT is 3.5–5 ms higher than predicted at every rate** (criterion: within 15%; measured +35–44%). All of it is queue time: the E3 finding, our request processing counted as simulated queue time while the engine is busy. With short prompts and outputs, a few milliseconds is a large share.
+- **Capacity is 9% lower: 74 requests per second against 81.7.** The mean step at saturation was 13.18 ms against 12.25 ms while the median was the same, so the extra time is in a minority of steps. In the real run new prompts reached the engine about three at a time (tokens per step p50 64, p90 1,597), while the virtual run spread them one per step (p50 575). One 512-token prompt riding with 64 decodes is free, because its compute (7.9 ms) hides under the step's memory time (10.6 ms); three together make the step compute-bound at 21.8 ms. Handing the virtual run's arrivals to the engine in 20–30 ms bunches reproduces the real run on every measure (capacity 70–77, mean step 12.95–14.15 ms, tokens per step p50 64 and p90 1,597), so grouped admission is confirmed as sufficient to explain the gap. That the grouping comes from our serialised request processing, and that equal-length requests keep it once saturated (the phase-locking of E1), is inferred.
+
+**The envelope.** Observed per-token timing stays within 5 ms of the simulated timeline up to about 25 requests per second on this workload (a batch of about 10, 1,675 output tokens per second), against about 200 requests per second for `fixed_rate` on the same workload. E0's formula underestimates lag here by 30–70% below saturation and by 3× at it: with 64-token outputs each token carries more per-request work than with E0's 200, and a backlog of hundreds of waiting requests adds event-loop work of its own. Beyond the envelope, simulated step times and batches stay right; observed per-token times and simulated TTFT carry our process's overhead.
 ## Open decisions
 
 None for the first `SchedulerEngine`. Decided on 2026-11-03: roofline × efficiency with a per-step overhead, always-chunked prefill, vLLM-style admission with a 1% watermark, and preemption by recomputation of the newest admitted sequence.
@@ -501,9 +714,29 @@ None for the first `SchedulerEngine`. Decided on 2026-11-03: roofline × efficie
 - **Tensor parallelism**: weights and KV split over N GPUs, multiplying bandwidth and FLOPS by N, plus an all-reduce cost per layer in each step.
 - **Not planned**: request priorities and speculative decoding.
 
+### Fidelity and performance: the per-token path
+
+**The problem.** A scheduler step releases one token to every sequence in the batch at the same simulated moment, as a real engine does. Our process then delivers them one after another on a single event loop, at about 90 µs of CPU each, so a token's observed time trails its simulated time by its place in that queue. Token lag p99 is about 1.7 ms + 0.15 ms per sequence in the batch (E0 under "Scheduler validation"): within the 5 ms fidelity bar up to about 25 concurrent streams per process, 11 ms at 64. Simulated values stay exact; what clients observe carries the jitter, and observed timing is what the systems under test experience, so this is a fidelity limit, not only a speed one.
+
+**The improvements**, largest first, with the per-token costs measured in E0 (about 90 µs in total):
+
+| # | Change | Cost now | Expected after | Notes |
+|---|---|---|---|---|
+| T1 | **SSE chunk templates**: build each request's constant JSON once and per token encode only the text, instead of building Pydantic models and calling `model_dump_json` | 21.5 µs | about 3 µs | The bytes sent must stay identical; a test compares them with today's output |
+| T2 | **Lighter per-token metrics**: avoid `prometheus_client`'s per-call overhead for the two per-token histograms (ITL, lag), for example by counting buckets ourselves and exporting through a custom collector, and trim the trace's bookkeeping | 14.8 µs | about 7 µs | Exported values must not change |
+| T3 | **Leaner response path**: write SSE bytes through the ASGI `send` directly instead of Starlette's `StreamingResponse` | 5.4 µs | about 1 µs | Disconnect detection, which Starlette does for us, must be kept |
+| T4 | **Step loop trimming**: fewer objects per step (`Work`, `StepPlan`, tuples), `__slots__`, a cheaper handoff to each stream than an `asyncio.Queue` | 12.8 µs + 4.9 µs engine stream | perhaps half | Pure-core tests guard behaviour; its cost is mostly cold caches, so the gain is the least certain |
+| T5 | **Per-request work**: parsing, validation and the worker-thread hop for the generator, about 1 ms on the event loop per request | about 5 µs per token at 200-token completions | | Matters more for short completions and high request rates. While the engine is busy, this time also reaches the simulated timeline: a request joins the first step after it reaches the engine, not the first step after it arrived, which added about 13 ms of queue time to 8,192-token prompts in E3 and 3.5–5 ms at every rate in E7, and at saturation bunches admissions so that prompts lose their free ride under memory-bound decode steps, which lowered capacity by 9% in E7. Making the work cheaper is the remedy; it cannot be backdated, because any step that started between the arrival and the hand-off is already running |
+| T6 | **Garbage collection**: one full collection took 13.7 ms, the largest lag outlier; `gc.freeze()` after startup keeps the long-lived objects out of every later collection | — | shorter full collections | A one-line change; to be measured |
+| T7 | **More processes**: several server processes, each its own simulated GPU, divide the burst by their number | — | — | Changes what one model means (each process is a replica) and needs Prometheus multiprocess mode; a later step |
+
+The socket write, uvloop's own work and the task switch per token, about 25–30 µs together, remain after T1–T4. With T1 and T2 the total is projected at about 60 µs per token, and about 50 with T3 and T4, so lag p99 would roughly halve and observed timings would stay within 5 ms up to about 40–50 streams. Each change is measured the same way as E0: process CPU from `/proc`, a py-spy profile in non-blocking mode (blocking mode distorts it), and the lag sweep.
+
+**Not an option**: spreading a step's releases over time to avoid the burst. It would smooth the observed numbers by misrepresenting batching. A realistic delivery spread, as a real API server has, could instead be modelled on purpose and configurable, once measured on a real one.
+
 ## Build order
 
 1. Metrics layer: tracing, recorders, Prometheus `/metrics` and `/metrics/summary` are done. The `llmsim-bench` load generator is done (L1–L6).
 2. Performance groundwork: `uvicorn[standard]` (httptools and uvloop) and the regex pre-filter are done; the resulting envelope is recorded under Known limits.
 3. `SchedulerEngine` with KV blocks, admission, preemption and the roofline step model: the engine, its wiring and its per-step metrics are done; validation with `llmsim-bench` is next.
-4. Transport work on the scheduler's token path, starting with a per-stage breakdown of first-token time.
+4. Transport work on the scheduler's token path: the per-token breakdown is measured (E0); the changes T1–T7 are listed under "Fidelity and performance: the per-token path", T1 and T2 first.

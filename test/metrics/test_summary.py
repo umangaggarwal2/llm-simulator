@@ -298,6 +298,7 @@ def test_scheduler_section_after_steps():
     assert section["step_seconds"]["max"] == pytest.approx(0.009)
     assert section["batch_tokens"]["mean"] == 102
     assert section["batch_sequences"]["max"] == 4
+    assert section["step_lag_seconds"]["count"] == 2
     assert section["tokens"] == {"prefill": 200, "decode": 4}
     assert section["waiting"] == {"now": 1, "max": 3}
     assert section["kv_cache"] == {"blocks": 100, "usage": 0.9, "usage_max": 0.9}
@@ -318,9 +319,19 @@ def test_reset_clears_totals_but_keeps_the_current_state():
     section = summary(recorder)["models"]["qwen-mock"]["scheduler"]
     assert section["steps"] == 0
     assert section["step_seconds"]["count"] == 0
+    assert section["step_lag_seconds"]["count"] == 0
     assert section["tokens"] == {"prefill": 0, "decode": 0}
     assert section["busy_fraction"] is None and section["memory_bound_fraction"] is None
     # Still 5 waiting and 70% full: the maxima start again from there.
     assert section["waiting"] == {"now": 5, "max": 5}
     assert section["kv_cache"]["usage"] == 0.7
     assert section["kv_cache"]["usage_max"] == 0.7
+
+
+def test_step_lag_percentiles():
+    recorder = make_recorder()
+    for lag in (0.0001, 0.0002, 0.0050):
+        recorder.step("qwen-mock", make_stats(lag=lag))
+    lag = summary(recorder)["models"]["qwen-mock"]["scheduler"]["step_lag_seconds"]
+    assert (lag["count"], lag["max"]) == (3, 0.005)
+    assert lag["p50"] == pytest.approx(0.0002)

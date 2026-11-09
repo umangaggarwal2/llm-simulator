@@ -99,6 +99,7 @@ class _SchedulerMetrics:
     duration: Histogram
     tokens_per_step: Histogram
     batch: Histogram
+    lag: Histogram
 
 
 class PrometheusRecorder(MetricsRecorder):
@@ -278,6 +279,13 @@ class PrometheusRecorder(MetricsRecorder):
                 "Sequences in each scheduler step.",
                 BATCH_BUCKETS,
             ),
+            lag=histogram(
+                "scheduler_step_lag_seconds",
+                "How late the step loop woke after each step's simulated end: the "
+                "loop's share of token_lag_seconds; the rest is time tokens "
+                "waited to be delivered.",
+                LAG_BUCKETS,
+            ),
         )
         self._schedulers: Dict[str, _SchedulerMetrics] = {}
         for name, description in models.items():
@@ -374,6 +382,7 @@ class PrometheusRecorder(MetricsRecorder):
         metrics.duration.observe(stats.duration)
         metrics.tokens_per_step.observe(stats.prefill_tokens + stats.decode_tokens)
         metrics.batch.observe(stats.sequences)
+        metrics.lag.observe(stats.lag)
 
     def _scheduler_children(self, model: str) -> _SchedulerMetrics:
         """A model's scheduler children, created on its first step.
@@ -402,6 +411,7 @@ class PrometheusRecorder(MetricsRecorder):
                 duration=f["duration"].labels(model),
                 tokens_per_step=f["tokens_per_step"].labels(model),
                 batch=f["batch"].labels(model),
+                lag=f["lag"].labels(model),
             )
             self._schedulers[model] = metrics
         return metrics

@@ -12,13 +12,13 @@ It is **not** a way to predict how fast a particular model will run on particula
 | Aspect | Fidelity | Why |
 |---|---|---|
 | API: OpenAI request and response format, streaming, errors, `max_tokens` | High | Built to match the real API |
-| Load trends: queueing under overload, TTFT growing with load, ITL rising with batch and context, prefill interference, KV-cache pressure and preemption | High (with the scheduler engine, in progress) | It applies the same scheduling rules as vLLM, so the curves have the right shape |
+| Load trends: queueing under overload, TTFT growing with load, ITL rising with batch and context, prefill interference, KV-cache pressure and preemption | High, with the `scheduler` engine | It applies the same scheduling rules as vLLM; measured step times match the roofline within 0.3% from 1 to 64 streams, and admission, chunked prefill and preemption behave as predicted (see [docs/performance-test.md](docs/performance-test.md)) |
 | Absolute numbers, such as "ITL is 23 ms at 40 users" | Medium; good once calibrated | The step-time model is an idealised roofline; one measurement against a real server anchors it |
 | Content: what the model says | None, by design | Responses are scripted in `responses.yml` and deterministic |
 
 The simulator models the resource constraints that drive client-visible latency and throughput: GPU memory, compute, memory bandwidth, KV-cache capacity, batching and scheduling. It does not measure real GPU utilization; those are modelled values derived from the configured hardware.
 
-**Limits.** One process keeps faithful timing up to about 200 requests per second or 13,000 output tokens per second (see [Known limits](docs/architecture.md#known-limits-the-single-process-fidelity-envelope)); beyond that, run more replicas, as you would with real servers. Results are trustworthy while the `token_lag_seconds` metric, the simulator's own timing error, stays small; the `llmsim-bench` report flags it.
+**Limits.** One process keeps faithful timing up to about 200 requests per second or 13,000 output tokens per second (see [Known limits](docs/architecture.md#known-limits-the-single-process-fidelity-envelope)); beyond that, run more replicas, as you would with real servers. With the `scheduler` engine the limit is set by batch size rather than throughput: a step releases a token to every sequence at once, and observed per-token timing stays within 5 ms of the simulated timeline up to about 25 concurrent streams per process with 200-token outputs, and up to about 25 requests per second (a batch of about 10) with 512-token prompts and 64-token outputs; simulated step times stay exact beyond that. Results are trustworthy while the `token_lag_seconds` metric, the simulator's own timing error, stays small; the `llmsim-bench` report flags it. How timing and fidelity are tested, and the results so far, are in [docs/performance-test.md](docs/performance-test.md).
 
 # Installation
 

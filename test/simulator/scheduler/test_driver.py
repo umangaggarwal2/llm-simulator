@@ -335,6 +335,23 @@ async def test_preemption_is_reported_with_the_work_it_threw_away(started):
     assert sum(s.preempted for s in steps) == len(preempting)
 
 
+async def test_step_lag_is_zero_on_time_and_shows_a_stall(started):
+    clock, steps = FakeClock(), []
+    engine = await started(make_engine(clock, on_step=steps.append))
+    async with aclosing(engine.run(make_plan(10), clock.now)) as stream:
+        async for event in stream:
+            if event.index == 2:
+                clock.now += 0.5  # the process stalls for half a second
+
+    assert all(s.lag == pytest.approx(0, abs=1e-12) for s in steps[:3])
+    # The step due during the stall woke about 0.5 s late; catching up, each
+    # later step is less late by its own duration.
+    assert steps[3].lag == pytest.approx(0.5, abs=0.01)
+    assert [s.lag for s in steps[3:]] == sorted(
+        (s.lag for s in steps[3:]), reverse=True
+    )
+
+
 async def test_a_failing_listener_stops_the_engine(started):
     def broken(stats):
         raise ValueError("bug in a recorder")

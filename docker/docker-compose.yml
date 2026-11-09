@@ -63,6 +63,12 @@ services:
     # Your user, so the results file is yours and the directory writable:
     # export HOST_UID=$(id -u) HOST_GID=$(id -g)
     user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    # Every stream is a socket; high concurrency or rates would otherwise
+    # hit the default limit of 1,024 open files.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     volumes:
       - ../results:/results
     command:

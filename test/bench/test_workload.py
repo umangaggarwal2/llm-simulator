@@ -101,8 +101,12 @@ def test_dataset_lines_are_cycled(tmp_path):
     [
         ("{not json", "prompts.jsonl:2: invalid JSON"),
         ('["a list"]', "prompts.jsonl:2: expected an object"),
-        ('{"text": "no prompt"}', "prompts.jsonl:2: missing 'prompt'"),
-        ('{"prompt": ""}', "prompts.jsonl:2: missing 'prompt'"),
+        ('{"text": "no prompt"}', "prompts.jsonl:2: needs exactly one of 'prompt'"),
+        ('{"prompt": "x", "input_tokens": 50}', "needs exactly one of 'prompt'"),
+        ('{"prompt": ""}', "prompts.jsonl:2: 'prompt' must be a non-empty string"),
+        ('{"input_tokens": 0}', "'input_tokens' must be a positive integer"),
+        ('{"input_tokens": "50"}', "'input_tokens' must be a positive integer"),
+        ('{"input_tokens": 3}', "prompts.jsonl:2: input_tokens 3 is less than"),
         ('{"prompt": "x", "max_tokens": 0}', "'max_tokens' must be a positive"),
         ('{"prompt": "x", "max_tokens": true}', "'max_tokens' must be a positive"),
     ],
@@ -116,3 +120,27 @@ def test_dataset_errors_name_the_line(tmp_path, line, message):
 def test_empty_dataset(tmp_path):
     with pytest.raises(ValueError, match="no prompts"):
         from_jsonl(write(tmp_path, "\n\n"), 10)
+
+
+def test_dataset_input_tokens_make_prompts_of_exactly_that_length(tmp_path):
+    path = write(
+        tmp_path,
+        '{"input_tokens": 50, "max_tokens": 200}\n'
+        '{"prompt": "a literal prompt"}\n'
+        '{"input_tokens": 4096, "max_tokens": 1}\n',
+    )
+    workload = from_jsonl(path, 10, prefix="[short] ")
+    short, literal, long = (workload.request(index) for index in range(3))
+    assert (prompt_tokens(short.prompt), short.max_tokens) == (50, 200)
+    assert short.prompt.startswith("[short] ")
+    assert literal == RequestSpec("[short] a literal prompt", 10)
+    assert (prompt_tokens(long.prompt), long.max_tokens) == (4096, 1)
+
+
+def test_dataset_synthetic_prompts_are_repeatable_and_seeded(tmp_path):
+    path = write(tmp_path, '{"input_tokens": 30}\n{"input_tokens": 30}\n')
+    first, again = from_jsonl(path, 10), from_jsonl(path, 10)
+    assert first.request(0) == again.request(0)
+    # Each line has its own words, and the seed changes them.
+    assert first.request(0) != first.request(1)
+    assert from_jsonl(path, 10, seed=1).request(0) != first.request(0)

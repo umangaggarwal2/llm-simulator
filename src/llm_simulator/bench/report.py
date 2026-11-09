@@ -189,10 +189,15 @@ def _comparison(result: BenchResult) -> List[str]:
         )
     )
     lag = server.server["lag"]
-    lines.append(
+    fidelity = (
         f"fidelity    server lag p50 {_seconds(lag.get('p50'))}"
         f" · p99 {_seconds(lag.get('p99'))} · max {_seconds(lag.get('max'))}"
     )
+    step_lag = _step_lag(result)
+    if step_lag is not None:
+        # The loop's share; the rest of each token's lag is delivery queueing.
+        fidelity += f" · of which step loop p99 {_seconds(step_lag.get('p99'))}"
+    lines.append(fidelity)
     lines.append("* client percentile − server percentile")
     return lines
 
@@ -224,6 +229,9 @@ def _scheduler(section: Dict[str, Any]) -> List[str]:
         f" · preemptions {preemptions['count']:,}"
         f" ({preemptions['tokens']:,} tokens to recompute)",
     ]
+    step_lag = section.get("step_lag_seconds")
+    if step_lag is not None:
+        lines[-1] += f" · step lag p99 {_seconds(step_lag.get('p99'))}"
     blocked = [
         f"{reason} {count:,}"
         for reason, count in section["blocked_steps"].items()
@@ -234,6 +242,12 @@ def _scheduler(section: Dict[str, Any]) -> List[str]:
             f"            steps leaving requests waiting: {', '.join(blocked)}"
         )
     return lines
+
+
+def _step_lag(result: BenchResult) -> Optional[Dict[str, Any]]:
+    """The step loop's lag, from a scheduler target new enough to report it."""
+    section = _scheduler_section(result)
+    return None if section is None else section.get("step_lag_seconds")
 
 
 def _percent(value: Optional[float]) -> str:
@@ -369,6 +383,30 @@ OPEN_SWEEP_COLUMNS = (
 )
 
 
+# Extra columns for a scheduler target: what its steps did at each level,
+# from the cell for one level's scheduler section.
+SCHEDULER_SWEEP_COLUMNS = (
+    ("batch", lambda s: _number(s["batch_sequences"]["mean"], ".1f")),
+    ("KV max", lambda s: _percent(s["kv_cache"]["usage_max"])),
+    ("preempt", lambda s: f"{s['preemptions']['count']:,}"),
+    ("blocked", lambda s: _top_reason(s["blocked_steps"])),
+    (
+        "step lag",
+        lambda s: _seconds((s.get("step_lag_seconds") or {}).get("p99")),
+    ),
+)
+
+
+def _number(value: Optional[float], spec: str) -> str:
+    return "—" if value is None else format(value, spec)
+
+
+def _top_reason(blocked: Dict[str, int]) -> str:
+    """The commonest reason requests were left waiting, e.g. "kv 4,210"."""
+    reason, count = max(blocked.items(), key=lambda item: item[1])
+    return f"{reason} {count:,}" if count else "—"
+
+
 def format_progress(number: int, total: int, level: SweepLevel) -> str:
     head = f"level {number}/{total} · {level.parameter} {level.value:g}"
     if level.result is None:
@@ -388,20 +426,38 @@ def format_sweep(levels: List[SweepLevel], workload: str) -> str:
     )
     lines = [f"sweep {parameter} · {first.model} · {workload} · {length}", ""]
     columns = SWEEP_COLUMNS + (OPEN_SWEEP_COLUMNS if parameter == "rate" else ())
-    lines.append(_sweep_row(parameter, [header for header, _ in columns]))
+    sections = {
+        id(level): _scheduler_section(level.result)
+        for level in levels
+        if level.result is not None
+    }
+    # Only when every level reached a scheduler target, so other engines'
+    # sweeps look as they always have.
+    scheduler = bool(sections) and all(sections.values())
+    headers = [header for header, _ in columns]
+    if scheduler:
+        headers += [header for header, _ in SCHEDULER_SWEEP_COLUMNS]
+    lines.append(_sweep_row(parameter, headers))
     for level in levels:
         if level.result is None:
             lines.append(f"{level.value:<12g}  failed: {level.error}")
             continue
-        lines.append(
-            _sweep_row(f"{level.value:g}", [cell(level.result) for _, cell in columns])
-        )
+        cells = [cell(level.result) for _, cell in columns]
+        if scheduler:
+            section = sections[id(level)]
+            cells += [cell(section) for _, cell in SCHEDULER_SWEEP_COLUMNS]
+        lines.append(_sweep_row(f"{level.value:g}", cells))
     lines.append("")
     lines.append(
         "lag p99: server's lag · dlv TTFT: client − server TTFT p50"
         " · client: SAT = client saturated"
         + (" · sched p99: TTFT from the scheduled time" if parameter == "rate" else "")
     )
+    if scheduler:
+        lines.append(
+            "batch: mean sequences per step · blocked: commonest reason requests"
+            " waited, in steps · step lag: the step loop's p99"
+        )
     return "\n".join(lines)
 
 

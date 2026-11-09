@@ -60,6 +60,7 @@ def test_every_catalogued_metric_is_exported():
         "llm_sim_scheduler_step_duration_seconds",
         "llm_sim_scheduler_batch_tokens",
         "llm_sim_scheduler_batch_sequences",
+        "llm_sim_scheduler_step_lag_seconds",
     }
 
 
@@ -300,6 +301,16 @@ def test_steps_add_up_in_counters_and_histograms():
     ) == pytest.approx(0.016)
     assert value(recorder, "llm_sim_scheduler_batch_tokens_sum", **m) == 204
     assert value(recorder, "llm_sim_scheduler_batch_sequences_sum", **m) == 6
+
+
+def test_step_lag_is_observed():
+    recorder = PrometheusRecorder(MODELS)
+    recorder.step("qwen-mock", make_stats(lag=0.0004))
+    m = {"model": "qwen-mock"}
+    assert value(recorder, "llm_sim_scheduler_step_lag_seconds_count", **m) == 1
+    assert value(
+        recorder, "llm_sim_scheduler_step_lag_seconds_sum", **m
+    ) == pytest.approx(0.0004)
 
 
 def test_preemptions_and_blocked_admissions_are_counted():

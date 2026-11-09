@@ -93,6 +93,9 @@ class StepStats:
     running: int
     kv_blocks_used: int
     kv_blocks_total: int
+    # Seconds the step loop woke after this step's simulated end: the loop's
+    # share of every token lag in the step; the rest is delivery queueing.
+    lag: float = 0.0
 
     @property
     def bound(self) -> str:

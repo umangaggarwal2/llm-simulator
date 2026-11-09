@@ -70,6 +70,7 @@ class SchedulerSnapshot:
     durations: WindowSnapshot
     batch_tokens: WindowSnapshot
     batch_sequences: WindowSnapshot
+    lag: WindowSnapshot
 
 
 @dataclass(frozen=True)
@@ -105,6 +106,7 @@ class _SchedulerState:
         self.durations = SampleWindow(samples)
         self.batch_tokens = SampleWindow(samples)
         self.batch_sequences = SampleWindow(samples)
+        self.lag = SampleWindow(samples)
         self._current(first)
         self.clear()
 
@@ -131,7 +133,12 @@ class _SchedulerState:
         self.blocked = dict.fromkeys(BLOCK_REASONS, 0)
         self.waiting_max = self.waiting
         self.kv_blocks_used_max = self.kv_blocks_used
-        for window in (self.durations, self.batch_tokens, self.batch_sequences):
+        for window in (
+            self.durations,
+            self.batch_tokens,
+            self.batch_sequences,
+            self.lag,
+        ):
             window.clear()
 
     def add(self, stats: StepStats) -> None:
@@ -151,6 +158,7 @@ class _SchedulerState:
         self.durations.add(stats.duration)
         self.batch_tokens.add(stats.prefill_tokens + stats.decode_tokens)
         self.batch_sequences.add(stats.sequences)
+        self.lag.add(stats.lag)
 
     def snapshot(self) -> SchedulerSnapshot:
         return SchedulerSnapshot(
@@ -171,6 +179,7 @@ class _SchedulerState:
             durations=_copy(self.durations),
             batch_tokens=_copy(self.batch_tokens),
             batch_sequences=_copy(self.batch_sequences),
+            lag=_copy(self.lag),
         )
 
 
@@ -414,6 +423,8 @@ def _scheduler(s: SchedulerSnapshot, since_reset: float) -> Dict[str, Any]:
         "step_seconds": window(s.durations),
         "batch_tokens": window(s.batch_tokens),
         "batch_sequences": window(s.batch_sequences),
+        # The step loop's own lateness; token lag minus this is delivery.
+        "step_lag_seconds": window(s.lag),
         "tokens": {"prefill": s.prefill_tokens, "decode": s.decode_tokens},
         "waiting": {"now": s.waiting, "max": s.waiting_max},
         "kv_cache": {

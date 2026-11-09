@@ -156,3 +156,37 @@ def test_hbm_gb_was_renamed(tmp_path):
     data["hardware"] = {"gpu": {"hbm_gb": 24, "memory_bandwidth_gbps": 600}}
     with pytest.raises(ModelsConfigError, match="hbm_gb"):
         load_models(write(tmp_path, data))
+
+
+def test_validation_variants_differ_from_base_only_where_intended():
+    config = load_models(REPO_ROOT / "config" / "validation" / "models.yml")
+    models = {model.name: model.model_dump() for model in config.models}
+    base = models.pop("base")
+    batched = next(
+        m
+        for m in load_models(REPO_ROOT / "config" / "models.yml").models
+        if m.name == "qwen-mock-batched"
+    ).model_dump()
+    assert {**base, "name": None} == {**batched, "name": None}
+
+    def changes(variant):
+        return {
+            (section, key)
+            for section, value in variant.items()
+            if section != "name"
+            for key in (value if isinstance(value, dict) else {None: value})
+            if (value.get(key) if isinstance(value, dict) else value)
+            != (base[section].get(key) if isinstance(value, dict) else base[section])
+        }
+
+    assert {name: changes(m) for name, m in models.items()} == {
+        "budget-2048": {("scheduler", "max_batch_tokens")},
+        "small-kv": {("context_length", None), ("kv_cache", "gpu_memory_utilization")},
+        "small-kv-no-watermark": {
+            ("context_length", None),
+            ("kv_cache", "gpu_memory_utilization"),
+            ("kv_cache", "watermark"),
+        },
+        "overhead-1ms": {("latency", "step_overhead_ms")},
+        "memory-eff-80": {("efficiency", "memory")},
+    }

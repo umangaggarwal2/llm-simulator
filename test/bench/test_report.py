@@ -363,3 +363,70 @@ def test_no_scheduler_block_for_other_engines():
         result([record(0)], server=ServerSummary(URL, True, model=section()))
     )
     assert not any(line.startswith("scheduler") for line in text.splitlines())
+
+
+def test_step_lag_in_the_block_and_the_fidelity_line():
+    scheduler = scheduler_section(
+        step_lag_seconds={"p50": 0.0001, "p99": 0.00041, "max": 0.002}
+    )
+    model = {**section(), "scheduler": scheduler}
+    text = format_result(
+        result([record(0)], server=ServerSummary(URL, True, model=model))
+    )
+    assert (
+        "fidelity    server lag p50 0.50 ms · p99 1.00 ms · max 2.00 ms"
+        " · of which step loop p99 0.41 ms"
+    ) in text
+    assert scheduler_lines(scheduler)[1].endswith("· step lag p99 0.41 ms")
+
+
+def test_no_step_lag_from_an_older_scheduler_target():
+    text = format_result(
+        result(
+            [record(0)],
+            server=ServerSummary(
+                URL, True, model={**section(), "scheduler": scheduler_section()}
+            ),
+        )
+    )
+    assert "of which step loop" not in text
+
+
+def scheduler_level(value, **scheduler):
+    config = BenchConfig(model="qwen-mock-batched", concurrency=value)
+    run = RunRecords(
+        [record(0)],
+        0.0,
+        2.0,
+        warmup=value,
+        server=ServerSummary(
+            URL,
+            True,
+            model={**section(), "scheduler": scheduler_section(**scheduler)},
+        ),
+    )
+    return SweepLevel(
+        "concurrency", value, config, result=summarize(run, config, "fixed prompt")
+    )
+
+
+def test_sweep_table_has_scheduler_columns_for_a_scheduler_target():
+    text = format_sweep(
+        [
+            scheduler_level(1, blocked_steps={"kv": 0, "budget": 0}),
+            scheduler_level(
+                64, step_lag_seconds={"p99": 0.0004}, preemptions={"count": 212}
+            ),
+        ],
+        "w",
+    )
+    lines = text.splitlines()
+    assert all(h in lines[2] for h in ("batch", "KV max", "preempt", "blocked"))
+    assert lines[3].split()[-5:] == ["41.2", "99%", "14", "—", "—"]
+    assert lines[4].split()[-6:] == ["99%", "212", "kv", "220", "0.40", "ms"]
+    assert "blocked: commonest reason" in text
+
+
+def test_sweep_table_has_no_scheduler_columns_for_other_engines():
+    text = format_sweep([level(1), level(8)], "w")
+    assert "KV max" not in text and "commonest reason" not in text
