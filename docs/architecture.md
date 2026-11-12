@@ -422,7 +422,7 @@ A process only needs to deliver tokens as fast as the GPU it simulates produces 
 
 ## Load generator (`bench/`)
 
-`llmsim-bench` measures latency as a client sees it: the third measurement layer, after the engine's simulated timeline and the server's release times. It speaks the OpenAI streaming protocol over HTTP with `aiohttp` (the optional `bench` extra), so it works against any OpenAI-compatible server, and imports no server code beyond pure helpers.
+`llmsim-bench` measures latency as a client sees it: the third measurement layer, after the engine's simulated timeline and the server's release times. It speaks the OpenAI streaming protocol over HTTP with `aiohttp`, a regular dependency installed with the package, so it works against any OpenAI-compatible server, and imports no server code beyond pure helpers.
 
 ```
 cli.py ──▶ sweep.py ──▶ (run one level)
@@ -455,7 +455,7 @@ data (no dependencies): config.py, records.py
 
 ## Deployment (`docker/`)
 
-- **Images.** One multi-stage `Dockerfile` builds two targets from the same locked dependencies: `server` (the simulator) and `bench` (adds the `bench` extra, aiohttp). A builder stage installs the dependencies from `poetry.lock` into a virtual environment, then installs the package as a wheel, since Poetry's editable install would point at a source tree the runtime images do not have; the runtime stages copy only the environment. Both run as an unprivileged user on `python:3.10-slim`, the version the tests run on.
+- **Images.** One multi-stage `Dockerfile` builds two targets from the same locked dependencies: `server` (the simulator) and `bench` (the load generator). Both copy the same environment, since one package carries both commands; they differ only in their entry point. A builder stage installs the dependencies from `poetry.lock` into a virtual environment, then installs the package as a wheel, since Poetry's editable install would point at a source tree the runtime images do not have; the runtime stages copy only the environment. Both run as an unprivileged user on `python:3.10-slim`, the version the tests run on.
 - **Configuration.** The image carries no config files of its own: the installed package ships its built-in configs in `llm_simulator/defaults/`, which the server uses when no file is named. When `SIM_CONFIG_DIR` is set, compose mounts it read-only at `/config` and points `LLM_SIM_MODELS` and `LLM_SIM_RESPONSES` at it; unset, it leaves both empty, which the settings treat as unset. `bench-target` always uses `builtin:bench-responses`.
 - **One worker.** Metrics live in process memory, so the image runs a single uvicorn worker; more workers would each keep their own `/metrics` and summary.
 - **Benchmark topology.** The `bench` profile runs a separate `bench-target` simulator with the user's models but the image's `bench-responses.yml`, so benchmarks get exact output lengths without changing the content served to applications, and the load generator reaches it over the compose network. The benchmark's settings live in the compose file. Client and server share the host's CPUs; the load generator's client health check flags when that inflates its numbers.

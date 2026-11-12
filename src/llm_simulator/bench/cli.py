@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, List, NamedTuple, Optional, Sequence
 
 from llm_simulator.bench import workload as workloads
+from llm_simulator.bench.client import open_session, stream_chat
 from llm_simulator.bench.config import BenchConfig
 from llm_simulator.bench.records import RunRecords
 from llm_simulator.bench.health import LoopMonitor
@@ -25,10 +26,9 @@ from llm_simulator.bench.report import (
 )
 from llm_simulator.bench.results import BenchResult, failure, summarize
 from llm_simulator.bench.runner import WarmupFailed, run_level
+from llm_simulator.bench.server import ServerMetrics, summary_url
 from llm_simulator.bench.sweep import levels, sweep
 from llm_simulator.bench.workload import Workload
-
-INSTALL_HINT = "llmsim-bench needs the bench extra: poetry install -E bench"
 
 
 class Arguments(NamedTuple):
@@ -215,9 +215,6 @@ async def run(config: BenchConfig, workload: Workload) -> RunRecords:
 
     Raises WarmupFailed if no warm-up request succeeded.
     """
-    from llm_simulator.bench.client import open_session, stream_chat
-    from llm_simulator.bench.server import ServerMetrics, summary_url
-
     async with open_session(config) as session:
         server = None
         if config.server_metrics:
@@ -248,11 +245,6 @@ async def run_result(config: BenchConfig, workload: Workload) -> BenchResult:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    try:
-        import aiohttp  # noqa: F401
-    except ImportError:
-        print(INSTALL_HINT, file=sys.stderr)
-        return 1
     args = parse_args(argv)
     config = args.config
     try:

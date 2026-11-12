@@ -21,10 +21,6 @@ COPY src ./src
 RUN poetry build --format wheel \
     && .venv/bin/python -m pip install --no-deps dist/*.whl
 
-# The load generator also needs the bench extra (aiohttp).
-FROM builder AS builder-bench
-RUN poetry install --only main --extras bench --no-root
-
 # --- server: the simulator ---
 FROM python:3.10-slim AS server
 RUN useradd --create-home --uid 1000 sim
@@ -47,7 +43,8 @@ CMD ["llmsimulator"]
 # --- bench: the load generator, llmsim-bench ---
 FROM python:3.10-slim AS bench
 RUN useradd --create-home --uid 1000 sim
-COPY --from=builder-bench /app/.venv /app/.venv
+# The same environment as the server: one package carries both commands.
+COPY --from=builder /app/.venv /app/.venv
 ENV PATH=/app/.venv/bin:$PATH \
     PYTHONUNBUFFERED=1
 USER sim

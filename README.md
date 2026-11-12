@@ -26,17 +26,17 @@ The simulator models the resource constraints that drive client-visible latency 
 Python 3.10 or later, with [Poetry](https://python-poetry.org/):
 
 ```bash
-poetry install -E bench        # -E bench adds the load generator, llmsim-bench
+poetry install                 # the server, llmsimulator, and the load generator, llmsim-bench
 poetry run llmsimulator         # serves on http://localhost:8080
 poetry run llmsimulator --port 9000 --responses my-responses.yml
 ```
 
 ## From git, in another project or image
-The package installs straight from the repository, with both commands; `[bench]` adds `llmsim-bench`. Pin a tag or commit for repeatable builds; the command-line flags and built-in configs need a version after 0.1.0. The installed package carries the example configs, so a bare `llmsimulator` runs anywhere; pass only the files you want to replace:
+The package installs straight from the repository, with both commands, `llmsimulator` and `llmsim-bench`. Pin a tag or commit for repeatable builds; the command-line flags and built-in configs need a version after 0.1.0. The installed package carries the example configs, so a bare `llmsimulator` runs anywhere; pass only the files you want to replace:
 
 ```dockerfile
 RUN pip install --no-cache-dir \
-    "llm-simulator[bench] @ git+https://github.com/umangaggarwal2/llm-simulator.git@main"
+    "llm-simulator @ git+https://github.com/umangaggarwal2/llm-simulator.git@main"
 COPY responses.yml /app/
 EXPOSE 9000
 CMD ["llmsimulator", "--port", "9000", "--responses", "/app/responses.yml"]
@@ -230,11 +230,7 @@ A list of values matches if any of them does. Order matters: put specific entrie
 - The built-in [`responses`](src/llm_simulator/defaults/responses.yml) is a larger example: a conversation about public-domain classics, with 1,000 answers. Pass your own file with `--responses` to replace it.
 
 # Benchmarking
-`llmsim-bench` sends streaming chat completions to any OpenAI-compatible server and measures them as a client sees them. It needs the `bench` extra:
-
-```bash
-poetry install -E bench
-```
+`llmsim-bench` sends streaming chat completions to any OpenAI-compatible server and measures them as a client sees them. It is installed with the package, alongside `llmsimulator`.
 
 For a controlled output length, start the simulator with the benchmark responses, where every response is long synthetic text, so `--max-tokens` sets the exact number of output tokens:
 

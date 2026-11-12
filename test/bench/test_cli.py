@@ -1,5 +1,4 @@
 import json
-import sys
 
 import pytest
 
@@ -92,12 +91,6 @@ def test_workload_errors_stop_before_sending(tmp_path, capsys):
     assert "missing.jsonl" in capsys.readouterr().err
     assert cli.main(["--model", "m", "--input-tokens", "3"]) == 2
     assert "input_tokens 3 is less than" in capsys.readouterr().err
-
-
-def test_missing_aiohttp_prints_the_install_hint(monkeypatch, capsys):
-    monkeypatch.setitem(sys.modules, "aiohttp", None)  # makes the import fail
-    assert cli.main(["--model", "m"]) == 1
-    assert cli.INSTALL_HINT in capsys.readouterr().err
 
 
 def test_phase_arguments():

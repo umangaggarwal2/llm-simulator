@@ -7,7 +7,7 @@ validated, docs/schema.md for responses.yml.
 
 ## Commands
 
-- Install: `poetry install -E bench`
+- Install: `poetry install` (both commands, `llmsimulator` and `llmsim-bench`)
 - Run: `poetry run llmsimulator` (port 8080); flags `--host`, `--port`, `--models`, `--responses`
   override `LLM_SIM_HOST`, `LLM_SIM_PORT`, `LLM_SIM_MODELS`, `LLM_SIM_RESPONSES`
 - Tests: `poetry run pytest -q`; skip the HTTP ones with `-m "not integration"`

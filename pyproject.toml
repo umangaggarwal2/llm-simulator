@@ -12,12 +12,10 @@ dependencies = [
     "pydantic>=2.1,<3",
     "uvicorn[standard] (>=0.15.0)",
     "pyyaml>=5.4.1",
-    "prometheus-client>=0.20,<1"
+    "prometheus-client>=0.20,<1",
+    # llmsim-bench's HTTP client
+    "aiohttp>=3.9,<4",
 ]
-
-[project.optional-dependencies]
-# The load generator, llmsim-bench: poetry install -E bench
-bench = ["aiohttp>=3.9,<4"]
 
 [project.urls]
 repository = "https://github.com/umangaggarwal2/llm-simulator"
