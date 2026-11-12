@@ -12,13 +12,13 @@ It is **not** a way to predict how fast a particular model will run on particula
 | Aspect | Fidelity | Why |
 |---|---|---|
 | API: OpenAI request and response format, streaming, errors, `max_tokens` | High | Built to match the real API |
-| Load trends: queueing under overload, TTFT growing with load, ITL rising with batch and context, prefill interference, KV-cache pressure and preemption | High, with the `scheduler` engine | It applies the same scheduling rules as vLLM; measured step times match the roofline within 0.3% from 1 to 64 streams, and admission, chunked prefill and preemption behave as predicted (see [docs/performance-test.md](docs/performance-test.md)) |
+| Load trends: queueing under overload, TTFT growing with load, ITL rising with batch and context, prefill interference, KV-cache pressure and preemption | High, with the `scheduler` engine | It applies the same scheduling rules as vLLM; measured step times match the roofline within 0.3% from 1 to 64 streams, and admission, chunked prefill and preemption behave as predicted (see [docs/performance-test.md](https://github.com/umangaggarwal2/llm-simulator/blob/main/docs/performance-test.md)) |
 | Absolute numbers, such as "ITL is 23 ms at 40 users" | Medium; good once calibrated | The step-time model is an idealised roofline; one measurement against a real server anchors it |
 | Content: what the model says | None, by design | Responses are scripted in `responses.yml` and deterministic |
 
 The simulator models the resource constraints that drive client-visible latency and throughput: GPU memory, compute, memory bandwidth, KV-cache capacity, batching and scheduling. It does not measure real GPU utilization; those are modelled values derived from the configured hardware.
 
-**Limits.** One process keeps faithful timing up to about 200 requests per second or 13,000 output tokens per second (see [Known limits](docs/architecture.md#known-limits-the-single-process-fidelity-envelope)); beyond that, run more replicas, as you would with real servers. With the `scheduler` engine the limit is set by batch size rather than throughput: a step releases a token to every sequence at once, and observed per-token timing stays within 5 ms of the simulated timeline up to about 25 concurrent streams per process with 200-token outputs, and up to about 25 requests per second (a batch of about 10) with 512-token prompts and 64-token outputs; simulated step times stay exact beyond that. Results are trustworthy while the `token_lag_seconds` metric, the simulator's own timing error, stays small; the `llmsim-bench` report flags it. How timing and fidelity are tested, and the results so far, are in [docs/performance-test.md](docs/performance-test.md).
+**Limits.** One process keeps faithful timing up to about 200 requests per second or 13,000 output tokens per second (see [Known limits](https://github.com/umangaggarwal2/llm-simulator/blob/main/docs/architecture.md#known-limits-the-single-process-fidelity-envelope)); beyond that, run more replicas, as you would with real servers. With the `scheduler` engine the limit is set by batch size rather than throughput: a step releases a token to every sequence at once, and observed per-token timing stays within 5 ms of the simulated timeline up to about 25 concurrent streams per process with 200-token outputs, and up to about 25 requests per second (a batch of about 10) with 512-token prompts and 64-token outputs; simulated step times stay exact beyond that. Results are trustworthy while the `token_lag_seconds` metric, the simulator's own timing error, stays small; the `llmsim-bench` report flags it. How timing and fidelity are tested, and the results so far, are in [docs/performance-test.md](https://github.com/umangaggarwal2/llm-simulator/blob/main/docs/performance-test.md).
 
 # Installation
 
@@ -147,7 +147,7 @@ Only `name` and `context_length` are required. The engine decides when tokens ar
 |---|---|---|
 | `instant` | Every token immediately | nothing |
 | `fixed_rate` | First token after `scheduler_overhead_ms` + prompt tokens / `prefill_tokens_per_second`, then one token every 1 / `decode_tokens_per_second` | `performance` (`latency` optional) |
-| `scheduler` | Continuous batching on one simulated GPU: requests share steps, wait when the KV cache or `max_num_sequences` is full, and are preempted when the cache runs out. Each step takes as long as a roofline model of the batch says. See `qwen-mock-batched` in the built-in [`models.yml`](src/llm_simulator/defaults/models.yml) for every field | `hardware` (with `peak_tflops`), `weights`, `kv_cache`, `scheduler` (`latency`, `efficiency` optional) |
+| `scheduler` | Continuous batching on one simulated GPU: requests share steps, wait when the KV cache or `max_num_sequences` is full, and are preempted when the cache runs out. Each step takes as long as a roofline model of the batch says. See `qwen-mock-batched` in the built-in [`models.yml`](https://github.com/umangaggarwal2/llm-simulator/blob/main/src/llm_simulator/defaults/models.yml) for every field | `hardware` (with `peak_tflops`), `weights`, `kv_cache`, `scheduler` (`latency`, `efficiency` optional) |
 
 The other sections are needed only by the engines that use them; the server refuses to start if a model's engine needs a section the model does not define, or if the file has an unknown key, a duplicate name or an unknown hardware profile.
 
@@ -165,11 +165,11 @@ The server reads its configuration from command-line flags and environment varia
 
 A file that cannot be read or does not validate stops the server before it starts, with a message naming the file and the problem.
 
-**Built-in configs.** The package ships three files, so the server runs from any directory without configuration: `models` (the three demo models), `responses` (the classics conversation) and `bench-responses` (synthetic text for benchmarks). Any file option or variable accepts `builtin:<name>` in place of a path, for example `--responses builtin:bench-responses`. To start your own from one, print it: `llmsimulator --print-config models > my-models.yml`. In the repository they live in [`src/llm_simulator/defaults/`](src/llm_simulator/defaults/); an empty variable counts as unset.
+**Built-in configs.** The package ships three files, so the server runs from any directory without configuration: `models` (the three demo models), `responses` (the classics conversation) and `bench-responses` (synthetic text for benchmarks). Any file option or variable accepts `builtin:<name>` in place of a path, for example `--responses builtin:bench-responses`. To start your own from one, print it: `llmsimulator --print-config models > my-models.yml`. In the repository they live in [`src/llm_simulator/defaults/`](https://github.com/umangaggarwal2/llm-simulator/tree/main/src/llm_simulator/defaults/); an empty variable counts as unset.
 
 # Response Configuration
 
-`responses.yml` decides what the simulator says, never when: timing comes only from the model's engine in `models.yml`. The full reference, including validation rules and exactly how a variant is chosen, is [docs/schema.md](docs/schema.md); this section is a guide to writing one.
+`responses.yml` decides what the simulator says, never when: timing comes only from the model's engine in `models.yml`. The full reference, including validation rules and exactly how a variant is chosen, is [docs/schema.md](https://github.com/umangaggarwal2/llm-simulator/blob/main/docs/schema.md); this section is a guide to writing one.
 
 ```yaml
 version: 1
@@ -225,9 +225,9 @@ A list of values matches if any of them does. Order matters: put specific entrie
 
 **Tips.**
 
-- For load tests, use `synthetic` answers longer than any `max_tokens` you send, so `max_tokens` sets the output length exactly: that is what the built-in [`bench-responses`](src/llm_simulator/defaults/bench-responses.yml) does, and what `llmsim-bench` assumes.
+- For load tests, use `synthetic` answers longer than any `max_tokens` you send, so `max_tokens` sets the output length exactly: that is what the built-in [`bench-responses`](https://github.com/umangaggarwal2/llm-simulator/blob/main/src/llm_simulator/defaults/bench-responses.yml) does, and what `llmsim-bench` assumes.
 - A `regex` whose matches must contain a plain word (`\bhamlet\b`) is skipped cheaply when the input lacks it, so many entries stay fast on long prompts. Patterns made only of classes and wildcards (`^.{500,}`) run on every request; put them late.
-- The built-in [`responses`](src/llm_simulator/defaults/responses.yml) is a larger example: a conversation about public-domain classics, with 1,000 answers. Pass your own file with `--responses` to replace it.
+- The built-in [`responses`](https://github.com/umangaggarwal2/llm-simulator/blob/main/src/llm_simulator/defaults/responses.yml) is a larger example: a conversation about public-domain classics, with 1,000 answers. Pass your own file with `--responses` to replace it.
 
 # Benchmarking
 `llmsim-bench` sends streaming chat completions to any OpenAI-compatible server and measures them as a client sees them. It is installed with the package, alongside `llmsimulator`.
@@ -330,7 +330,7 @@ Read a sweep for the level where latency breaks away while throughput stops keep
 
 # Metrics
 
-`GET /metrics` exposes the simulator's server-side metrics in Prometheus text format, labelled by `model`: TTFT, inter-token latency, TPOT, E2E, queue, prefill and decode time, request sizes, request and token counters, running requests, and `llm_sim_token_lag_seconds`, which shows how closely the simulator kept to its configured timeline. Models on the `scheduler` engine also export what each step did: queue and batch sizes, KV-cache usage, preemptions, why admission stopped, step durations and whether each step was compute- or memory-bound (`llm_sim_scheduler_*`, `llm_sim_kv_cache_*`, `llm_sim_preempt*`); `GET /metrics/summary` has the same as a `scheduler` section. Times are measured when the engine releases each token. See [docs/architecture.md](docs/architecture.md#metrics) for the full catalogue.
+`GET /metrics` exposes the simulator's server-side metrics in Prometheus text format, labelled by `model`: TTFT, inter-token latency, TPOT, E2E, queue, prefill and decode time, request sizes, request and token counters, running requests, and `llm_sim_token_lag_seconds`, which shows how closely the simulator kept to its configured timeline. Models on the `scheduler` engine also export what each step did: queue and batch sizes, KV-cache usage, preemptions, why admission stopped, step durations and whether each step was compute- or memory-bound (`llm_sim_scheduler_*`, `llm_sim_kv_cache_*`, `llm_sim_preempt*`); `GET /metrics/summary` has the same as a `scheduler` section. Times are measured when the engine releases each token. See [docs/architecture.md](https://github.com/umangaggarwal2/llm-simulator/blob/main/docs/architecture.md#metrics) for the full catalogue.
 
 `GET /metrics/summary` returns the same measurements as JSON with exact percentiles (mean, min, p50, p90, p95, p99, max) over recent traffic: the last 10,000 requests for per-request values and the last 100,000 tokens for ITL and lag, plus throughput over the last 60 s. `POST /metrics/summary/reset` starts a fresh measurement period, for example before a benchmark run.
 
@@ -388,11 +388,11 @@ Version 0.1.0. Until 1.0, the formats of `models.yml` and `responses.yml`, the m
 - **Metrics**: Prometheus `/metrics` and an exact-percentile `/metrics/summary`, per request and, for the scheduler, per step (batch, KV usage, preemptions, why requests waited).
 - **Load generator**: `llmsim-bench`, closed and open loop, sweeps, datasets, client health checks and comparison with the server's own measurements.
 - **Deployment**: Docker images and a compose setup for the simulator and benchmarks.
-- **Validation**: each scheduler decision has been checked against a prediction made before running it; step times match the roofline within 0.3% from 1 to 64 streams. Results and method are in [docs/performance-test.md](docs/performance-test.md).
+- **Validation**: each scheduler decision has been checked against a prediction made before running it; step times match the roofline within 0.3% from 1 to 64 streams. Results and method are in [docs/performance-test.md](https://github.com/umangaggarwal2/llm-simulator/blob/main/docs/performance-test.md).
 
 ## Known limits
 
-- **Concurrency per process.** Observed per-token timing stays within 5 ms of the simulated timeline up to about 25 concurrent streams with the `scheduler` engine, fewer with short outputs; simulated step times stay exact beyond that. Our own request handling also adds a few milliseconds of queue time while the engine is busy. See "Known limits" in [docs/architecture.md](docs/architecture.md).
+- **Concurrency per process.** Observed per-token timing stays within 5 ms of the simulated timeline up to about 25 concurrent streams with the `scheduler` engine, fewer with short outputs; simulated step times stay exact beyond that. Our own request handling also adds a few milliseconds of queue time while the engine is busy. See "Known limits" in [docs/architecture.md](https://github.com/umangaggarwal2/llm-simulator/blob/main/docs/architecture.md).
 - **Absolute numbers are uncalibrated.** The efficiency settings default to an ideal GPU, so latencies are optimistic until fitted to a measurement of a real server.
 - **Slowness, not failures.** Queueing, preemption stalls and saturation are simulated; errors and dropped connections are not yet.
 - **One process, one simulated GPU per model.** Run several processes for several replicas.
@@ -402,7 +402,7 @@ Version 0.1.0. Until 1.0, the formats of `models.yml` and `responses.yml`, the m
 Roughly in order of priority:
 
 1. **Failure injection**: configurable error responses (429, 500, 503 with OpenAI-shaped bodies), streams that stop mid-response, and latency spikes, by rate or by rule, so retries, timeouts and circuit breakers can be tested.
-2. **A faster per-token path**: cheaper SSE encoding, per-token metrics and request handling, which measurements suggest would roughly double the concurrency one process serves faithfully. The changes and their expected gains are listed under "Fidelity and performance: the per-token path" in [docs/architecture.md](docs/architecture.md).
+2. **A faster per-token path**: cheaper SSE encoding, per-token metrics and request handling, which measurements suggest would roughly double the concurrency one process serves faithfully. The changes and their expected gains are listed under "Fidelity and performance: the per-token path" in [docs/architecture.md](https://github.com/umangaggarwal2/llm-simulator/blob/main/docs/architecture.md).
 3. **More of the API**: `stop`, `n`, tool calls, `response_format` and logprobs.
 4. **Calibration**: fitting the efficiency and overhead settings to one run against a real server.
 5. **Prefix caching**: shared prompt prefixes such as system prompts skip prefill, as in vLLM and SGLang.
