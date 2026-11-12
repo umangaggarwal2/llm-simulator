@@ -104,6 +104,22 @@ def test_builtin_names_select_shipped_files(tmp_path):
         server.stop()
 
 
+def test_print_config_tolerates_a_reader_that_stops_early(tmp_path):
+    # As in `llmsimulator --print-config responses | head`: the reader closes
+    # the pipe long before the 265 KB file is written.
+    process = subprocess.Popen(
+        COMMAND + ["--print-config", "responses"],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert process.stdout.read(100).startswith(b"# Sample responses")
+    process.stdout.close()
+    error = process.stderr.read().decode()
+    assert process.wait(timeout=60) == 0
+    assert "Traceback" not in error and "BrokenPipeError" not in error
+
+
 def test_a_missing_config_exits_with_a_message(tmp_path):
     result = subprocess.run(
         COMMAND + ["--models", str(tmp_path / "missing.yml")],

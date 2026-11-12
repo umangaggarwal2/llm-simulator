@@ -1,6 +1,7 @@
 """The OpenAI-compatible HTTP API."""
 
 import argparse
+import os
 import sys
 import time
 import uuid
@@ -246,12 +247,28 @@ def _port(text: str) -> int:
     return port
 
 
+def _print(text: str) -> None:
+    """Write text to stdout, tolerating a reader that stops early.
+
+    `llmsimulator --print-config responses | head` closes the pipe after a
+    few lines; that is not an error. Flushing here raises it while it can be
+    caught, and pointing stdout at /dev/null stops Python from raising it
+    again when it flushes at exit (the recipe in Python's signal docs).
+    """
+    try:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+    except BrokenPipeError:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     import uvicorn
 
     args = parse_args(argv)
     if args.print_config:
-        sys.stdout.write(defaults.path(args.print_config).read_text(encoding="utf-8"))
+        _print(defaults.path(args.print_config).read_text(encoding="utf-8"))
         return 0
     # The app is built here rather than by uvicorn, so the flags can reach it
     # and a broken configuration stops with its message instead of a
