@@ -2,7 +2,7 @@
 
 llm-simulator serves an OpenAI-compatible chat API backed by a deterministic fake model. It separates two questions that a real LLM server answers together:
 
-- **What** does the model say? Answered by the **generator**, from `config/responses.yml`.
+- **What** does the model say? Answered by the **generator**, from `responses.yml` (built-in by default, `src/llm_simulator/defaults/`).
 - **When** does each token arrive? Answered by the **engine**, from the model and hardware configuration.
 
 Keeping them apart lets the response content stay simple and deterministic while the timing model grows from fixed delays to a full scheduler with batching and KV-cache pressure, without either side changing the other.
@@ -13,7 +13,7 @@ Keeping them apart lets the response content stay simple and deterministic while
 |---|---|---|
 | OpenAI-compatible API | `client/api.py`, `client/schemas.py`, `client/sse.py`, `client/convert.py`, `client/exception.py` | Done; serves responses from `responses.yml` |
 | Arrival middleware and runtime dependency | `client/middleware.py`, `client/dependencies.py` | Done |
-| Model deployments and startup wiring | `llm/models.py`, `config/models.yml`, `runtime.py`, `settings.py` | Done |
+| Model deployments and startup wiring | `llm/models.py`, `defaults/models.yml`, `runtime.py`, `settings.py` | Done |
 | Response schema and loader | `llm/responses.py`, [schema.md](schema.md) | Done |
 | Tokenizer | `llm/tokenizer.py` | Done (`RegexTokenizer`) |
 | Matcher | `llm/matcher.py` | Done |
@@ -24,7 +24,7 @@ Keeping them apart lets the response content stay simple and deterministic while
 | `FixedRateEngine` | `simulator/fixed_rate.py`, `simulator/_timing.py` | Done |
 | Metrics: tracing, recorder, `/metrics` | `metrics/`, `client/api.py` | Done |
 | Metrics: `/metrics/summary` with sample windows | `metrics/summary.py`, `metrics/window.py` | Done |
-| Load generator: client, closed and open loop, workload, phases, client health, server comparison, sweeps | `bench/`, `config/bench-responses.yml` | Done |
+| Load generator: client, closed and open loop, workload, phases, client health, server comparison, sweeps | `bench/`, `defaults/bench-responses.yml` | Done |
 | Docker images and compose (simulator, benchmark) | `docker/`, `.dockerignore` | Done |
 | `SchedulerEngine` | `simulator/scheduler/` | Done: tiers 1–3, wiring (`qwen-mock-batched`) and step metrics; validation with `llmsim-bench` (S6) next |
 
@@ -74,7 +74,7 @@ simulator/ (engine for the model)
 client/sse.py ── SSE chunks            client/api.py ── one ChatCompletionResponse with Usage
 ```
 
-Configuration is loaded when the app is created, not when a module is imported. `main()` parses the command-line flags, builds the settings (`Settings.from_args`: each flag given overrides its environment variable, `LLM_SIM_MODELS`, `LLM_SIM_RESPONSES`, `LLM_SIM_HOST`, `LLM_SIM_PORT`), calls `create_app` and only then starts uvicorn with the app. Building the app before uvicorn starts lets the flags reach it, and a broken or missing config stops the process with its message and exit code 1, before it accepts traffic. Tests build apps from small test configs with `create_app(Settings(...))`, and `uvicorn llm_simulator.client.api:create_app --factory` still works for running uvicorn directly, configured from the environment.
+Configuration is loaded when the app is created, not when a module is imported. `main()` parses the command-line flags, builds the settings (`Settings.from_args`: each flag given overrides its environment variable, `LLM_SIM_MODELS`, `LLM_SIM_RESPONSES`, `LLM_SIM_HOST`, `LLM_SIM_PORT`), calls `create_app` and only then starts uvicorn with the app. Building the app before uvicorn starts lets the flags reach it, and a broken or missing config stops the process with its message and exit code 1, before it accepts traffic. Without a file named by flag or variable, the settings point at the built-in configs installed with the package (`llm_simulator/defaults/`, looked up with `importlib.resources`); any file value may be `builtin:<name>` instead of a path, resolved in one place, `defaults.resolve`. Tests build apps from small test configs with `create_app(Settings(...))`, and `uvicorn llm_simulator.client.api:create_app --factory` still works for running uvicorn directly, configured from the environment.
 
 ## HTTP layer
 
@@ -86,7 +86,7 @@ Configuration is loaded when the app is created, not when a module is imported. 
 - **OpenAI behaviour.** `model` is required. `seed`, `max_completion_tokens` (which takes precedence over the deprecated `max_tokens`) and `stream_options.include_usage` are supported; with `include_usage`, every chunk carries `"usage": null` and a final chunk with empty `choices` carries the totals. The stream starts with a `role: assistant` chunk. Parameters the simulator does not use, such as `temperature`, are accepted and ignored. `/v1/models` lists every configured model.
 - **Message content.** A request message's `content` may be a string or an array of content parts, as in OpenAI's API. The schema (`ChatMessageParam`) turns a string into one text part before validation, so errors point at paths like `messages.[0].content.[1].type` rather than at each member of a `str | list` union; responses use a separate `ChatMessage` whose content is always a string. The schema accepts every part type OpenAI defines, and `to_generation_request` decides what the simulator serves: text parts are joined with no separator into the domain `Message`, so the tokenizer, matcher and generator see plain text, and any other part (`image_url`, `input_audio`, `file`, `refusal`) is rejected with a 400 naming the part, before anything is generated or traced. Rejecting rather than dropping them keeps prompt token counts honest.
 
-## Model deployments (`config/models.yml`)
+## Model deployments (`models.yml`)
 
 Each entry in `models` is a model deployed on a hardware profile, with its serving settings. Hardware profiles are named once under `hardware` and referenced by name; every model that references a profile gets its own simulated GPU of that type.
 
@@ -450,13 +450,13 @@ data (no dependencies): config.py, records.py
 - **Sweeps.** `sweep.py` runs one config per value of `concurrency` or `rate`, in order, each as a full run with its own session and the same prompts, so differences come from the load. A level whose warm-up fails is recorded and the sweep continues. The terminal shows a progress line per level and a table; the JSON holds every level's full results.
 - **Client health.** `LoopMonitor` asks to wake every 10 ms during the measure phase and records how late each wake-up was, together with the client's CPU time; `results.py` turns the samples into `ClientHealth`. An idle loop is about 1 ms late; above 5 ms at p99, the report warns that the client inflated its own latencies. The monitor collects and the analysis judges, like requests and their records. It found a real distortion in the project's own tests: with the server in a thread of the test process, the two share the GIL, and the client's loop was 10 ms late at p99 while the server streamed. Bench integration tests therefore run the server in its own process.
 - **Closed loop.** `closed_loop()` keeps N requests in flight: each worker sends its next request when its previous one finishes. A slower server is offered less load, so this measures capacity at a fixed number of streams but hides queueing; the open loop (L6) shows it.
-- **Controlled output length.** With `config/bench-responses.yml`, every response is long synthetic text, so `max_completion_tokens` sets the exact output length; tagged prompts (`[short]`, `[long]`) select deterministic mixed lengths.
+- **Controlled output length.** With the built-in `bench-responses`, every response is long synthetic text, so `max_completion_tokens` sets the exact output length; tagged prompts (`[short]`, `[long]`) select deterministic mixed lengths.
 - **Build layers.** L1 core loop, L2 percentiles, throughput and JSON report, L3 workload (input length, JSONL, prefix), L4 phases and client health, L5 comparison with `/metrics/summary`, L6 open loop and sweeps: all done. The client stays single-process until the performance work; multi-process load comes after.
 
 ## Deployment (`docker/`)
 
 - **Images.** One multi-stage `Dockerfile` builds two targets from the same locked dependencies: `server` (the simulator) and `bench` (adds the `bench` extra, aiohttp). A builder stage installs the dependencies from `poetry.lock` into a virtual environment, then installs the package as a wheel, since Poetry's editable install would point at a source tree the runtime images do not have; the runtime stages copy only the environment. Both run as an unprivileged user on `python:3.10-slim`, the version the tests run on.
-- **Configuration.** The server image carries the repository's `config/` as defaults; compose mounts a directory read-only at `/config` and points `LLM_SIM_MODELS` and `LLM_SIM_RESPONSES` at it, so the composition root reads the user's files exactly as it does locally.
+- **Configuration.** The image carries no config files of its own: the installed package ships its built-in configs in `llm_simulator/defaults/`, which the server uses when no file is named. When `SIM_CONFIG_DIR` is set, compose mounts it read-only at `/config` and points `LLM_SIM_MODELS` and `LLM_SIM_RESPONSES` at it; unset, it leaves both empty, which the settings treat as unset. `bench-target` always uses `builtin:bench-responses`.
 - **One worker.** Metrics live in process memory, so the image runs a single uvicorn worker; more workers would each keep their own `/metrics` and summary.
 - **Benchmark topology.** The `bench` profile runs a separate `bench-target` simulator with the user's models but the image's `bench-responses.yml`, so benchmarks get exact output lengths without changing the content served to applications, and the load generator reaches it over the compose network. The benchmark's settings live in the compose file. Client and server share the host's CPUs; the load generator's client health check flags when that inflates its numbers.
 

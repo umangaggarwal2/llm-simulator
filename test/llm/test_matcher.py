@@ -1,10 +1,10 @@
 import dataclasses
 import random
 import re
-from pathlib import Path
 
 import pytest
 
+from llm_simulator import defaults
 from llm_simulator.llm.matcher import DEFAULT_ID, Matcher
 from llm_simulator.llm.responses import (
     MATCH_OPERATORS,
@@ -12,8 +12,6 @@ from llm_simulator.llm.responses import (
     load_responses,
 )
 from llm_simulator.llm import matcher as matcher_module
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def make_matcher(*entries):
@@ -142,7 +140,7 @@ def test_every_schema_operator_has_a_builder():
     ],
 )
 def test_real_config(text, expected):
-    matcher = Matcher(load_responses(REPO_ROOT / "config" / "responses.yml"))
+    matcher = Matcher(load_responses(defaults.path("responses")))
     assert matcher.match(text).entry_id == expected
 
 
@@ -232,7 +230,7 @@ def unfiltered(matcher, text):
 
 
 def test_prefilter_never_changes_the_answer_on_the_sample_config():
-    matcher = Matcher(load_responses(REPO_ROOT / "config" / "responses.yml"))
+    matcher = Matcher(load_responses(defaults.path("responses")))
     rng = random.Random(0)
     needles = list(matcher._needles)
     # Near misses: required strings inside other words, and spellings the

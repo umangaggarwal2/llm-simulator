@@ -2,15 +2,19 @@
 
 import dataclasses
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Optional
+
+from llm_simulator import defaults
 
 
 @dataclass(frozen=True)
 class Settings:
-    models_path: Path = Path("config/models.yml")
-    responses_path: Path = Path("config/responses.yml")
+    # The built-in files shipped with the package, unless a flag or variable
+    # names others.
+    models_path: Path = field(default_factory=lambda: defaults.path("models"))
+    responses_path: Path = field(default_factory=lambda: defaults.path("responses"))
     host: str = "0.0.0.0"
     port: int = 8080
     # Values /metrics/summary keeps: the last N requests for per-request
@@ -24,25 +28,26 @@ class Settings:
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "Settings":
         """Read the LLM_SIM_* variables listed in the README.
 
-        Unset variables keep their defaults; relative paths resolve against the
-        working directory. A number that is not a positive integer raises
-        ValueError naming the variable.
+        Unset or empty variables keep their defaults. A path is a file,
+        relative to the working directory, or `builtin:<name>` for a file
+        shipped with the package. A number that is not a positive integer, or
+        an unknown built-in name, raises ValueError naming the variable.
         """
         env = os.environ if env is None else env
-        defaults = cls()
+        fallback = cls()
         return cls(
-            models_path=Path(env.get("LLM_SIM_MODELS", defaults.models_path)),
-            responses_path=Path(env.get("LLM_SIM_RESPONSES", defaults.responses_path)),
-            host=env.get("LLM_SIM_HOST", defaults.host),
-            port=_positive_int(env, "LLM_SIM_PORT", defaults.port),
+            models_path=_path(env, "LLM_SIM_MODELS", fallback.models_path),
+            responses_path=_path(env, "LLM_SIM_RESPONSES", fallback.responses_path),
+            host=_get(env, "LLM_SIM_HOST") or fallback.host,
+            port=_positive_int(env, "LLM_SIM_PORT", fallback.port),
             summary_request_samples=_positive_int(
-                env, "LLM_SIM_SUMMARY_REQUEST_SAMPLES", defaults.summary_request_samples
+                env, "LLM_SIM_SUMMARY_REQUEST_SAMPLES", fallback.summary_request_samples
             ),
             summary_token_samples=_positive_int(
-                env, "LLM_SIM_SUMMARY_TOKEN_SAMPLES", defaults.summary_token_samples
+                env, "LLM_SIM_SUMMARY_TOKEN_SAMPLES", fallback.summary_token_samples
             ),
             summary_rate_seconds=_positive_int(
-                env, "LLM_SIM_SUMMARY_RATE_SECONDS", defaults.summary_rate_seconds
+                env, "LLM_SIM_SUMMARY_RATE_SECONDS", fallback.summary_rate_seconds
             ),
         )
 
@@ -54,7 +59,8 @@ class Settings:
         given taking precedence over its variable.
 
         args has the attributes of the server's parsed flags (host, port,
-        models, responses), each None when the flag was not given.
+        models, responses), each None when the flag was not given; models and
+        responses are already resolved to paths, `builtin:` names included.
         """
         flags = {
             "host": args.host,
@@ -68,8 +74,28 @@ class Settings:
         )
 
 
+def _get(env: Mapping[str, str], name: str) -> Optional[str]:
+    """A variable's value, or None when it is unset or empty.
+
+    Empty counts as unset so that tools which can only set a variable, such
+    as Docker Compose substituting a default, can still leave it to the
+    default.
+    """
+    return env.get(name) or None
+
+
+def _path(env: Mapping[str, str], name: str, default: Path) -> Path:
+    raw = _get(env, name)
+    if raw is None:
+        return default
+    try:
+        return defaults.resolve(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name}: {exc}") from None
+
+
 def _positive_int(env: Mapping[str, str], name: str, default: int) -> int:
-    raw = env.get(name)
+    raw = _get(env, name)
     if raw is None:
         return default
     try:

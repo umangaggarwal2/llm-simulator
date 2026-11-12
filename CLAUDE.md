@@ -13,7 +13,10 @@ validated, docs/schema.md for responses.yml.
 - Tests: `poetry run pytest -q`; skip the HTTP ones with `-m "not integration"`
 - Format: `poetry run black src test`; `black --check src test` should pass before committing
 - Benchmark: `poetry run llmsim-bench --model <name> --base-url http://localhost:8080/v1 ...`,
-  against a server started with `LLM_SIM_RESPONSES=config/bench-responses.yml`
+  against a server started with `--responses builtin:bench-responses`
+- Built-in configs (`models`, `responses`, `bench-responses`) live in
+  `src/llm_simulator/defaults/` and ship with the package; `config/validation/` holds the
+  models used to validate the simulator
 
 ## Architecture rules
 

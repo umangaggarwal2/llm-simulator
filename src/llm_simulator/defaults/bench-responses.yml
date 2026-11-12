@@ -1,5 +1,5 @@
 # Responses for benchmarking with llmsim-bench. Start the server with
-#   LLM_SIM_RESPONSES=config/bench-responses.yml poetry run llmsimulator
+#   llmsimulator --responses builtin:bench-responses
 # Every response is long synthetic text, so the request's max_tokens sets the
 # exact output length, whatever the prompt says. See docs/schema.md.
 version: 1

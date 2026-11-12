@@ -1,8 +1,8 @@
 import hashlib
-from pathlib import Path
 
 import pytest
 
+from llm_simulator import defaults
 from llm_simulator.errors import ContextLengthExceeded
 from llm_simulator.llm.generator import SYNTHETIC_CORPUS, Generator
 from llm_simulator.llm.matcher import DEFAULT_ID, Matcher
@@ -10,7 +10,6 @@ from llm_simulator.llm.responses import ResponsesConfig, load_responses
 from llm_simulator.llm.tokenizer import RegexTokenizer
 from llm_simulator.types import GenerationRequest, Message
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
 TOKENIZER = RegexTokenizer()
 FIVE_VARIANTS = {"variants": ["zero", "one", "two", "three", "four"]}
 
@@ -300,7 +299,7 @@ def test_plan_fields():
 
 
 def test_real_config():
-    config = load_responses(REPO_ROOT / "config" / "responses.yml")
+    config = load_responses(defaults.path("responses"))
     generator = Generator(Matcher(config), TOKENIZER, 32768, config.seed)
     plan = generator.generate(ask("What are the themes in Macbeth?\n"))
     assert plan.entry_id == "macbeth-themes"

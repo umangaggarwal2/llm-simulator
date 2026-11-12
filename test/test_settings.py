@@ -3,14 +3,17 @@ from pathlib import Path
 
 import pytest
 
+from llm_simulator import defaults
 from llm_simulator.settings import Settings
 
 
 def test_defaults_when_nothing_is_set():
     settings = Settings.from_env({})
     assert settings == Settings()
-    assert settings.models_path == Path("config/models.yml")
-    assert settings.responses_path == Path("config/responses.yml")
+    # The files shipped with the package, so it runs from any directory.
+    assert settings.models_path == defaults.path("models")
+    assert settings.responses_path == defaults.path("responses")
+    assert settings.models_path.is_file() and settings.responses_path.is_file()
     assert settings.host == "0.0.0.0"
     assert settings.port == 8080
     assert settings.summary_request_samples == 10_000
@@ -107,3 +110,43 @@ def test_flags_leave_the_summary_settings_to_the_environment():
         flags(port=9100), {"LLM_SIM_SUMMARY_RATE_SECONDS": "10"}
     )
     assert settings.summary_rate_seconds == 10
+
+
+# --- Built-in files ---
+
+
+def test_builtin_names_resolve_to_the_shipped_files():
+    settings = Settings.from_env(
+        {
+            "LLM_SIM_MODELS": "builtin:models",
+            "LLM_SIM_RESPONSES": "builtin:bench-responses",
+        }
+    )
+    assert settings.models_path == defaults.path("models")
+    assert settings.responses_path == defaults.path("bench-responses")
+    assert settings.responses_path.name == "bench-responses.yml"
+
+
+def test_an_unknown_builtin_name_names_the_variable_and_the_choices():
+    with pytest.raises(ValueError) as error:
+        Settings.from_env({"LLM_SIM_RESPONSES": "builtin:bench"})
+    message = str(error.value)
+    assert message.startswith("LLM_SIM_RESPONSES: unknown built-in config 'bench'")
+    assert "models, responses, bench-responses" in message
+
+
+def test_other_values_are_paths():
+    settings = Settings.from_env({"LLM_SIM_MODELS": "my/models.yml"})
+    assert settings.models_path == Path("my/models.yml")
+
+
+@pytest.mark.parametrize(
+    "name", ["LLM_SIM_MODELS", "LLM_SIM_RESPONSES", "LLM_SIM_HOST", "LLM_SIM_PORT"]
+)
+def test_an_empty_variable_counts_as_unset(name):
+    assert Settings.from_env({name: ""}) == Settings()
+
+
+def test_every_builtin_file_is_shipped():
+    for name in defaults.NAMES:
+        assert defaults.path(name).is_file(), name

@@ -2,17 +2,17 @@
 
 import asyncio
 import json
-from pathlib import Path
 
 import pytest
 
+from llm_simulator import defaults
 from llm_simulator.bench import cli
 from llm_simulator.bench.config import BenchConfig
 from llm_simulator.bench.results import summarize
 
 pytestmark = pytest.mark.integration
 
-BENCH_RESPONSES = Path(__file__).parents[2] / "config" / "bench-responses.yml"
+BENCH_RESPONSES = defaults.path("bench-responses")
 MODELS = {
     "version": 1,
     "models": [

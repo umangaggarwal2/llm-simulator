@@ -17,18 +17,22 @@ services:
     ports:
       - "${SIM_PORT:-8080}:8080"
     volumes:
-      # A directory with models.yml and responses.yml; an absolute path, or
-      # relative to this file. Defaults to the repository's config/.
+      # SIM_CONFIG_DIR: a directory with models.yml and responses.yml, an
+      # absolute path or relative to this file. Unset, nothing of yours is
+      # mounted and the built-in configs are served.
       - ${SIM_CONFIG_DIR:-../config}:/config:ro
     environment:
-      LLM_SIM_MODELS: /config/models.yml
-      LLM_SIM_RESPONSES: /config/responses.yml
+      # Your files when SIM_CONFIG_DIR is set; otherwise empty, which the
+      # server treats as unset, so it uses the built-ins.
+      LLM_SIM_MODELS: ${SIM_CONFIG_DIR:+/config/models.yml}
+      LLM_SIM_RESPONSES: ${SIM_CONFIG_DIR:+/config/responses.yml}
     # Recovers from a crash, but gives up on a config that can never load:
     # the error stays in `docker compose logs simulator`.
     restart: on-failure:3
 
-  # A second simulator for benchmarks only: your models.yml, but the image's
-  # bench-responses.yml, so that --max-tokens sets the exact output length.
+  # A second simulator for benchmarks only: your models.yml (or the built-in
+  # ones), but the built-in bench responses, so that --max-tokens sets the
+  # exact output length.
   bench-target:
     profiles: [bench]
     # The same image as the simulator; built from cache if that one exists.
@@ -40,8 +44,8 @@ services:
     volumes:
       - ${SIM_CONFIG_DIR:-../config}:/config:ro
     environment:
-      LLM_SIM_MODELS: /config/models.yml
-      LLM_SIM_RESPONSES: /app/config/bench-responses.yml
+      LLM_SIM_MODELS: ${SIM_CONFIG_DIR:+/config/models.yml}
+      LLM_SIM_RESPONSES: builtin:bench-responses
     healthcheck:
       interval: 1s
       start_period: 10s

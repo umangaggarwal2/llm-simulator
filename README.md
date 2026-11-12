@@ -32,14 +32,14 @@ poetry run llmsimulator --port 9000 --responses my-responses.yml
 ```
 
 ## From git, in another project or image
-The package installs straight from the repository, with both commands; `[bench]` adds `llmsim-bench`. Pin a tag or commit for repeatable builds; the command-line flags need a version after 0.1.0. The example configs live in the repository, not in the installed package, so pass your own files:
+The package installs straight from the repository, with both commands; `[bench]` adds `llmsim-bench`. Pin a tag or commit for repeatable builds; the command-line flags and built-in configs need a version after 0.1.0. The installed package carries the example configs, so a bare `llmsimulator` runs anywhere; pass only the files you want to replace:
 
 ```dockerfile
 RUN pip install --no-cache-dir \
     "llm-simulator[bench] @ git+https://github.com/umangaggarwal2/llm-simulator.git@main"
-COPY models.yml responses.yml /app/
+COPY responses.yml /app/
 EXPOSE 9000
-CMD ["llmsimulator", "--port", "9000", "--models", "/app/models.yml", "--responses", "/app/responses.yml"]
+CMD ["llmsimulator", "--port", "9000", "--responses", "/app/responses.yml"]
 ```
 
 ## Running in Docker
@@ -53,7 +53,7 @@ docker compose -f docker/docker-compose.yml --profile '*' down    # everything, 
 
 A plain `down` only sees services outside profiles: it would leave a `bench-target` from an interrupted benchmark running, and report the network as still in use. `--profile '*'` includes every profile.
 
-**Your own configuration.** The simulator reads `models.yml` and `responses.yml` from a mounted directory, by default the repository's `config/`. Point `SIM_CONFIG_DIR` at another directory containing both files (an absolute path); it is mounted read-only. A config that fails validation stops the container with the same errors as running locally (`docker compose logs simulator`); after three failed restarts it stays stopped. `SIM_PORT` changes the host port.
+**Your own configuration.** By default the simulator serves its built-in configs. Point `SIM_CONFIG_DIR` at a directory containing your `models.yml` and `responses.yml` (an absolute path) to serve those instead; it is mounted read-only. A config that fails validation stops the container with the same errors as running locally (`docker compose logs simulator`); after three failed restarts it stays stopped. `SIM_PORT` changes the host port.
 
 ```bash
 SIM_CONFIG_DIR=/path/to/my-config docker compose -f docker/docker-compose.yml up -d
@@ -103,13 +103,13 @@ curl http://localhost:8080/v1/chat/completions -H "Content-Type: application/jso
   -d '{"model": "qwen-mock", "messages": [{"role": "user", "content": "Hello"}], "stream": true}'
 ```
 
-`GET /v1/models` lists the configured models. The repository's `config/models.yml` has three: `qwen-mock` (fixed timing), `qwen-mock-batched` (the scheduler: latency depends on load) and `tiny-mock` (instant).
+`GET /v1/models` lists the configured models. The built-in `models.yml` has three: `qwen-mock` (fixed timing), `qwen-mock-batched` (the scheduler: latency depends on load) and `tiny-mock` (instant).
 
 # API
 The simulator serves `POST /v1/chat/completions` (streaming and non-streaming) and `GET /v1/models`, so OpenAI's SDKs and other OpenAI clients work unchanged with `base_url` pointed at it. A message's `content` may be a string or an array of text parts (`[{"type": "text", "text": "..."}]`); text parts are joined with no separator. The simulated models are text-only, so image, audio and file parts are rejected with a 400.
 
 # Configuration YAML
-`config/models.yml` lists the models the simulator serves; clients pick one with the request's `model` field. Hardware profiles are defined once and referenced by name, and each model that references a profile gets its own simulated GPU of that type. Memory is in GiB (`hbm_gib`); bandwidth (`memory_bandwidth_gbps`) and `peak_tflops` are decimal, as GPU vendors quote them.
+`models.yml` lists the models the simulator serves; clients pick one with the request's `model` field. Hardware profiles are defined once and referenced by name, and each model that references a profile gets its own simulated GPU of that type. Memory is in GiB (`hbm_gib`); bandwidth (`memory_bandwidth_gbps`) and `peak_tflops` are decimal, as GPU vendors quote them.
 
 ```yaml
 version: 1
@@ -147,7 +147,7 @@ Only `name` and `context_length` are required. The engine decides when tokens ar
 |---|---|---|
 | `instant` | Every token immediately | nothing |
 | `fixed_rate` | First token after `scheduler_overhead_ms` + prompt tokens / `prefill_tokens_per_second`, then one token every 1 / `decode_tokens_per_second` | `performance` (`latency` optional) |
-| `scheduler` | Continuous batching on one simulated GPU: requests share steps, wait when the KV cache or `max_num_sequences` is full, and are preempted when the cache runs out. Each step takes as long as a roofline model of the batch says. See `qwen-mock-batched` in `config/models.yml` for every field | `hardware` (with `peak_tflops`), `weights`, `kv_cache`, `scheduler` (`latency`, `efficiency` optional) |
+| `scheduler` | Continuous batching on one simulated GPU: requests share steps, wait when the KV cache or `max_num_sequences` is full, and are preempted when the cache runs out. Each step takes as long as a roofline model of the batch says. See `qwen-mock-batched` in the built-in [`models.yml`](src/llm_simulator/defaults/models.yml) for every field | `hardware` (with `peak_tflops`), `weights`, `kv_cache`, `scheduler` (`latency`, `efficiency` optional) |
 
 The other sections are needed only by the engines that use them; the server refuses to start if a model's engine needs a section the model does not define, or if the file has an unknown key, a duplicate name or an unknown hardware profile.
 
@@ -155,8 +155,8 @@ The server reads its configuration from command-line flags and environment varia
 
 | Flag | Variable | Default |
 |---|---|---|
-| `--models FILE` | `LLM_SIM_MODELS` | `config/models.yml` |
-| `--responses FILE` | `LLM_SIM_RESPONSES` | `config/responses.yml` |
+| `--models FILE` | `LLM_SIM_MODELS` | `builtin:models` |
+| `--responses FILE` | `LLM_SIM_RESPONSES` | `builtin:responses` |
 | `--host HOST` | `LLM_SIM_HOST` | `0.0.0.0` |
 | `--port PORT` | `LLM_SIM_PORT` | `8080` |
 | | `LLM_SIM_SUMMARY_REQUEST_SAMPLES` | `10000`: requests `/metrics/summary` keeps per-request values for |
@@ -164,6 +164,8 @@ The server reads its configuration from command-line flags and environment varia
 | | `LLM_SIM_SUMMARY_RATE_SECONDS` | `60`: seconds throughput is averaged over |
 
 A file that cannot be read or does not validate stops the server before it starts, with a message naming the file and the problem.
+
+**Built-in configs.** The package ships three files, so the server runs from any directory without configuration: `models` (the three demo models), `responses` (the classics conversation) and `bench-responses` (synthetic text for benchmarks). Any file option or variable accepts `builtin:<name>` in place of a path, for example `--responses builtin:bench-responses`. To start your own from one, print it: `llmsimulator --print-config models > my-models.yml`. In the repository they live in [`src/llm_simulator/defaults/`](src/llm_simulator/defaults/); an empty variable counts as unset.
 
 # Response Configuration
 
@@ -223,9 +225,9 @@ A list of values matches if any of them does. Order matters: put specific entrie
 
 **Tips.**
 
-- For load tests, use `synthetic` answers longer than any `max_tokens` you send, so `max_tokens` sets the output length exactly: that is what [`config/bench-responses.yml`](config/bench-responses.yml) does, and what `llmsim-bench` assumes.
+- For load tests, use `synthetic` answers longer than any `max_tokens` you send, so `max_tokens` sets the output length exactly: that is what the built-in [`bench-responses`](src/llm_simulator/defaults/bench-responses.yml) does, and what `llmsim-bench` assumes.
 - A `regex` whose matches must contain a plain word (`\bhamlet\b`) is skipped cheaply when the input lacks it, so many entries stay fast on long prompts. Patterns made only of classes and wildcards (`^.{500,}`) run on every request; put them late.
-- [`config/responses.yml`](config/responses.yml) is a larger example: a conversation about public-domain classics, with 1,000 answers. Point `LLM_SIM_RESPONSES` at your own file to replace it.
+- The built-in [`responses`](src/llm_simulator/defaults/responses.yml) is a larger example: a conversation about public-domain classics, with 1,000 answers. Pass your own file with `--responses` to replace it.
 
 # Benchmarking
 `llmsim-bench` sends streaming chat completions to any OpenAI-compatible server and measures them as a client sees them. It needs the `bench` extra:
@@ -237,7 +239,7 @@ poetry install -E bench
 For a controlled output length, start the simulator with the benchmark responses, where every response is long synthetic text, so `--max-tokens` sets the exact number of output tokens:
 
 ```bash
-LLM_SIM_RESPONSES=config/bench-responses.yml poetry run llmsimulator
+poetry run llmsimulator --responses builtin:bench-responses
 poetry run llmsim-bench --model qwen-mock --concurrency 8 --requests 100 \
     --input-tokens 512 --max-tokens 256 --output run.json
 ```

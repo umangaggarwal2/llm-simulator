@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from llm_simulator import defaults
 from llm_simulator.llm.models import ModelsConfig, ModelsConfigError, load_models
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -19,7 +20,7 @@ def minimal(**model):
 
 
 def test_repo_config_loads():
-    config = load_models(REPO_ROOT / "config" / "models.yml")
+    config = load_models(defaults.path("models"))
     names = [model.name for model in config.models]
     assert names == ["qwen-mock", "qwen-mock-batched", "tiny-mock"]
     qwen = config.models[0]
@@ -164,7 +165,7 @@ def test_validation_variants_differ_from_base_only_where_intended():
     base = models.pop("base")
     batched = next(
         m
-        for m in load_models(REPO_ROOT / "config" / "models.yml").models
+        for m in load_models(defaults.path("models")).models
         if m.name == "qwen-mock-batched"
     ).model_dump()
     assert {**base, "name": None} == {**batched, "name": None}

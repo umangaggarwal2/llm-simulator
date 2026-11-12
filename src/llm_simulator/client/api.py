@@ -13,6 +13,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from llm_simulator import defaults
 from llm_simulator.client.convert import to_generation_request, to_usage
 from llm_simulator.client.dependencies import (
     find_runtime,
@@ -195,23 +196,44 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         prog="llmsimulator",
         description="Serve simulated LLMs through an OpenAI-compatible API.",
         epilog="Each option overrides its LLM_SIM_* environment variable; "
-        "see the README for the others.",
+        "see the README for the others. A FILE is a path or builtin:NAME, one "
+        "of the files shipped with the package; without one, the built-in "
+        "models and responses are served.",
     )
     parser.add_argument("--host", help="interface to listen on (LLM_SIM_HOST)")
     parser.add_argument("--port", type=_port, help="port to listen on (LLM_SIM_PORT)")
     parser.add_argument(
-        "--models", type=Path, metavar="FILE", help="models.yml (LLM_SIM_MODELS)"
+        "--models",
+        type=_config_file,
+        metavar="FILE",
+        help="models.yml (LLM_SIM_MODELS)",
     )
     parser.add_argument(
         "--responses",
-        type=Path,
+        type=_config_file,
         metavar="FILE",
         help="responses.yml (LLM_SIM_RESPONSES)",
+    )
+    parser.add_argument(
+        "--print-config",
+        choices=defaults.NAMES,
+        metavar="NAME",
+        help="print a built-in config file, to copy and edit, and exit: "
+        + ", ".join(defaults.NAMES),
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {package_version()}"
     )
     return parser.parse_args(argv)
+
+
+def _config_file(text: str) -> Path:
+    # argparse shows an ArgumentTypeError's message but replaces a
+    # ValueError's with a generic one, which would hide the available names.
+    try:
+        return defaults.resolve(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
 
 
 def _port(text: str) -> int:
@@ -228,6 +250,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     import uvicorn
 
     args = parse_args(argv)
+    if args.print_config:
+        sys.stdout.write(defaults.path(args.print_config).read_text(encoding="utf-8"))
+        return 0
     # The app is built here rather than by uvicorn, so the flags can reach it
     # and a broken configuration stops with its message instead of a
     # traceback from inside the server's startup. Config errors, unreadable

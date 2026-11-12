@@ -15,7 +15,7 @@ An experiment checks a **scheduler decision** with simulated values and reports 
 
 1. **Predict before running.** Every experiment states its prediction, computed from the cost model and the policy's rules, and its pass criteria before any run. A result is then a test, not a description.
 2. **One variable at a time.** Each model in [`config/validation/models.yml`](../config/validation/models.yml) differs from `base` (identical to `qwen-mock-batched`) in one field, and a test in `test/llm/test_models.py` checks that it does.
-3. **Exact output lengths.** The server runs with `config/bench-responses.yml`, so `--max-tokens` sets every completion's length exactly.
+3. **Exact output lengths.** The server runs with the built-in `bench-responses`, so `--max-tokens` sets every completion's length exactly.
 4. **When a prediction fails, stop.** Work out whether the prediction or the simulator is wrong before running the next experiment, and record which. A prediction is never adjusted to fit a result after the fact; if it was wrong, the correction and the reason are written down.
 5. **An explanation is not proof.** When a result deviates and an explanation fits the numbers, it is recorded as inferred until a control experiment removes the suspected cause and changes nothing else (E1b is one).
 6. **Check the instrument.** A profiler or a script is trusted only after it agrees with an independent measurement (see "Measuring CPU" below).
@@ -25,7 +25,7 @@ An experiment checks a **scheduler decision** with simulated values and reports 
 Client and server on one machine, the server alone on its port:
 
 ```
-LLM_SIM_MODELS=config/validation/models.yml LLM_SIM_RESPONSES=config/bench-responses.yml \
+LLM_SIM_MODELS=config/validation/models.yml LLM_SIM_RESPONSES=builtin:bench-responses \
 LLM_SIM_PORT=8093 poetry run llmsimulator
 ```
 

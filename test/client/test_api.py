@@ -2,11 +2,13 @@ import dataclasses
 import json
 import time
 from importlib import metadata
+from pathlib import Path
 
 import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from llm_simulator import defaults
 from llm_simulator.client import api
 from llm_simulator.client.api import create_app, main, parse_args
 from llm_simulator.client.dependencies import get_runtimes
@@ -326,6 +328,40 @@ def test_help_and_version_exit_without_starting(flag, uvicorn_runs, capsys):
         assert out.strip() == f"llmsimulator {metadata.version('llm-simulator')}"
     else:
         assert "--responses FILE" in out
+
+
+def test_print_config_prints_a_builtin_file_without_starting(uvicorn_runs, capsys):
+    assert main(["--print-config", "bench-responses"]) == 0
+    assert not uvicorn_runs
+    assert capsys.readouterr().out == defaults.path("bench-responses").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_unknown_builtin_names_are_rejected_with_the_choices(capsys):
+    with pytest.raises(SystemExit):
+        parse_args(["--responses", "builtin:bench"])
+    error = capsys.readouterr().err
+    assert "argument --responses: unknown built-in config 'bench'" in error
+    assert "available: models, responses, bench-responses" in error
+
+
+def test_builtin_flags_resolve_to_the_shipped_files():
+    args = parse_args(["--models", "builtin:models", "--responses", "x/r.yml"])
+    assert args.models == defaults.path("models")
+    assert args.responses == Path("x/r.yml")
+
+
+def test_main_serves_the_builtin_models_without_any_configuration(
+    monkeypatch, uvicorn_runs
+):
+    for name in ("LLM_SIM_MODELS", "LLM_SIM_RESPONSES"):
+        monkeypatch.delenv(name, raising=False)
+    assert main([]) == 0
+    [(app, _)] = uvicorn_runs
+    with TestClient(app) as client:
+        models = {m["id"] for m in client.get("/v1/models").json()["data"]}
+    assert models == {"qwen-mock", "qwen-mock-batched", "tiny-mock"}
 
 
 @pytest.mark.parametrize("port", ["0", "65536", "eighty", "-1"])

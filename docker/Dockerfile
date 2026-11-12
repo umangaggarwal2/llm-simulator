@@ -29,14 +29,12 @@ RUN poetry install --only main --extras bench --no-root
 FROM python:3.10-slim AS server
 RUN useradd --create-home --uid 1000 sim
 COPY --from=builder /app/.venv /app/.venv
-# Default configs, used when none are mounted; also bench-responses.yml.
-COPY config /app/config
+# Without LLM_SIM_MODELS or LLM_SIM_RESPONSES, the server uses the configs
+# installed with the package (builtin:models, builtin:responses).
 ENV PATH=/app/.venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     LLM_SIM_HOST=0.0.0.0 \
-    LLM_SIM_PORT=8080 \
-    LLM_SIM_MODELS=/app/config/models.yml \
-    LLM_SIM_RESPONSES=/app/config/responses.yml
+    LLM_SIM_PORT=8080
 USER sim
 EXPOSE 8080
 # The slim image has no curl; Python can make the request itself.
