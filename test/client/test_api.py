@@ -8,7 +8,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from llm_simulator.client import api
-from llm_simulator.client.api import create_app
+from llm_simulator.client.api import create_app, main, parse_args
 from llm_simulator.client.dependencies import get_runtimes
 from llm_simulator.llm.models import ModelsConfigError
 from llm_simulator.llm.responses import ResponsesConfigError
@@ -236,6 +236,109 @@ def test_bad_responses_config_fails_at_startup(tmp_path):
     responses = {"version": 1, "default": {"content": "{nope}"}}
     with pytest.raises(ResponsesConfigError):
         create_app(write_configs(tmp_path, responses=responses))
+
+
+# --- Command line ---
+
+
+@pytest.fixture
+def uvicorn_runs(monkeypatch):
+    """Replaces uvicorn.run, so main() returns instead of serving."""
+    import uvicorn
+
+    calls = []
+    monkeypatch.setattr(
+        uvicorn, "run", lambda app, **kwargs: calls.append((app, kwargs))
+    )
+    return calls
+
+
+def test_main_serves_the_app_built_from_its_flags(tmp_path, uvicorn_runs):
+    settings = write_configs(tmp_path)
+    code = main(
+        [
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "9100",
+            "--models",
+            str(settings.models_path),
+            "--responses",
+            str(settings.responses_path),
+        ]
+    )
+    assert code == 0
+    [(app, kwargs)] = uvicorn_runs
+    assert kwargs == {"host": "127.0.0.1", "port": 9100}
+    with TestClient(app) as client:
+        assert {m["id"] for m in client.get("/v1/models").json()["data"]} == {
+            "big-mock",
+            "small-mock",
+        }
+        assert chat(client).status_code == 200
+
+
+def test_main_reports_a_missing_file_without_starting(tmp_path, uvicorn_runs, capsys):
+    code = main(["--models", str(tmp_path / "missing.yml")])
+    assert code == 1
+    assert not uvicorn_runs
+    error = capsys.readouterr().err
+    assert error.startswith("llmsimulator: error: ")
+    assert "missing.yml: cannot read file" in error
+    assert "Traceback" not in error
+
+
+def test_main_reports_an_invalid_config_without_starting(
+    tmp_path, uvicorn_runs, capsys
+):
+    settings = write_configs(
+        tmp_path, models={"version": 1, "models": [{"name": "m", "context_length": 0}]}
+    )
+    code = main(
+        [
+            "--models",
+            str(settings.models_path),
+            "--responses",
+            str(settings.responses_path),
+        ]
+    )
+    assert code == 1
+    assert not uvicorn_runs
+    assert "context_length" in capsys.readouterr().err
+
+
+def test_main_reports_an_invalid_environment_variable(
+    monkeypatch, uvicorn_runs, capsys
+):
+    monkeypatch.setenv("LLM_SIM_PORT", "eighty")
+    assert main([]) == 1
+    assert "LLM_SIM_PORT" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", ["--help", "--version"])
+def test_help_and_version_exit_without_starting(flag, uvicorn_runs, capsys):
+    with pytest.raises(SystemExit) as exit:
+        main([flag])
+    assert exit.value.code == 0
+    assert not uvicorn_runs
+    out = capsys.readouterr().out
+    if flag == "--version":
+        assert out.strip() == f"llmsimulator {metadata.version('llm-simulator')}"
+    else:
+        assert "--responses FILE" in out
+
+
+@pytest.mark.parametrize("port", ["0", "65536", "eighty", "-1"])
+def test_invalid_ports_are_rejected(port, capsys):
+    with pytest.raises(SystemExit) as exit:
+        parse_args(["--port", port])
+    assert exit.value.code == 2
+    assert "invalid port" in capsys.readouterr().err
+
+
+def test_flags_default_to_none_so_the_environment_applies():
+    args = parse_args([])
+    assert (args.host, args.port, args.models, args.responses) == (None,) * 4
 
 
 class RecordingEngine(InstantEngine):

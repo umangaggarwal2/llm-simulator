@@ -74,7 +74,7 @@ simulator/ (engine for the model)
 client/sse.py ── SSE chunks            client/api.py ── one ChatCompletionResponse with Usage
 ```
 
-Configuration is loaded when the app is created, not when a module is imported: `main()` runs uvicorn in factory mode (`create_app` is called at server start). A broken config stops the server before it accepts traffic, and tests build apps from small test configs with `create_app(Settings(...))`. File paths, host and port come from environment variables (`LLM_SIM_MODELS`, `LLM_SIM_RESPONSES`, `LLM_SIM_HOST`, `LLM_SIM_PORT`).
+Configuration is loaded when the app is created, not when a module is imported. `main()` parses the command-line flags, builds the settings (`Settings.from_args`: each flag given overrides its environment variable, `LLM_SIM_MODELS`, `LLM_SIM_RESPONSES`, `LLM_SIM_HOST`, `LLM_SIM_PORT`), calls `create_app` and only then starts uvicorn with the app. Building the app before uvicorn starts lets the flags reach it, and a broken or missing config stops the process with its message and exit code 1, before it accepts traffic. Tests build apps from small test configs with `create_app(Settings(...))`, and `uvicorn llm_simulator.client.api:create_app --factory` still works for running uvicorn directly, configured from the environment.
 
 ## HTTP layer
 

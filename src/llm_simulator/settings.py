@@ -1,9 +1,10 @@
-"""Process-level settings, read from environment variables."""
+"""Process-level settings, read from environment variables and command-line flags."""
 
+import dataclasses
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Any, Mapping, Optional
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,27 @@ class Settings:
             summary_rate_seconds=_positive_int(
                 env, "LLM_SIM_SUMMARY_RATE_SECONDS", defaults.summary_rate_seconds
             ),
+        )
+
+    @classmethod
+    def from_args(
+        cls, args: Any, env: Optional[Mapping[str, str]] = None
+    ) -> "Settings":
+        """The environment's settings, with each command-line flag that was
+        given taking precedence over its variable.
+
+        args has the attributes of the server's parsed flags (host, port,
+        models, responses), each None when the flag was not given.
+        """
+        flags = {
+            "host": args.host,
+            "port": args.port,
+            "models_path": args.models,
+            "responses_path": args.responses,
+        }
+        return dataclasses.replace(
+            cls.from_env(env),
+            **{name: value for name, value in flags.items() if value is not None},
         )
 
 

@@ -1,3 +1,4 @@
+from argparse import Namespace
 from pathlib import Path
 
 import pytest
@@ -69,3 +70,40 @@ def test_non_numeric_port_is_rejected():
 def test_numbers_must_be_positive_integers(name, raw):
     with pytest.raises(ValueError, match=name):
         Settings.from_env({name: raw})
+
+
+def flags(host=None, port=None, models=None, responses=None):
+    return Namespace(host=host, port=port, models=models, responses=responses)
+
+
+def test_flags_override_their_variables():
+    env = {
+        "LLM_SIM_HOST": "10.0.0.1",
+        "LLM_SIM_PORT": "9000",
+        "LLM_SIM_MODELS": "/env/models.yml",
+        "LLM_SIM_RESPONSES": "/env/responses.yml",
+    }
+    settings = Settings.from_args(
+        flags("127.0.0.1", 9100, Path("/flag/models.yml"), Path("/flag/responses.yml")),
+        env,
+    )
+    assert (settings.host, settings.port) == ("127.0.0.1", 9100)
+    assert settings.models_path == Path("/flag/models.yml")
+    assert settings.responses_path == Path("/flag/responses.yml")
+
+
+def test_flags_not_given_keep_the_environment_or_the_default():
+    settings = Settings.from_args(
+        flags(responses=Path("/flag/responses.yml")), {"LLM_SIM_PORT": "9000"}
+    )
+    assert settings.responses_path == Path("/flag/responses.yml")
+    assert settings.port == 9000
+    assert settings.models_path == Settings().models_path
+    assert settings.host == Settings().host
+
+
+def test_flags_leave_the_summary_settings_to_the_environment():
+    settings = Settings.from_args(
+        flags(port=9100), {"LLM_SIM_SUMMARY_RATE_SECONDS": "10"}
+    )
+    assert settings.summary_rate_seconds == 10

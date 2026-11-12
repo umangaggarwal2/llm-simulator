@@ -1,10 +1,13 @@
 """The OpenAI-compatible HTTP API."""
 
+import argparse
+import sys
 import time
 import uuid
 from contextlib import aclosing, asynccontextmanager
 from importlib import metadata
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Sequence
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
@@ -187,19 +190,57 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     return app
 
 
-def main():
+def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="llmsimulator",
+        description="Serve simulated LLMs through an OpenAI-compatible API.",
+        epilog="Each option overrides its LLM_SIM_* environment variable; "
+        "see the README for the others.",
+    )
+    parser.add_argument("--host", help="interface to listen on (LLM_SIM_HOST)")
+    parser.add_argument("--port", type=_port, help="port to listen on (LLM_SIM_PORT)")
+    parser.add_argument(
+        "--models", type=Path, metavar="FILE", help="models.yml (LLM_SIM_MODELS)"
+    )
+    parser.add_argument(
+        "--responses",
+        type=Path,
+        metavar="FILE",
+        help="responses.yml (LLM_SIM_RESPONSES)",
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"%(prog)s {package_version()}"
+    )
+    return parser.parse_args(argv)
+
+
+def _port(text: str) -> int:
+    try:
+        port = int(text)
+    except ValueError:
+        port = 0
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError(f"invalid port: {text!r}")
+    return port
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
     import uvicorn
 
-    settings = Settings.from_env()
-    # Factory mode: the app, and its configuration, are built when the server
-    # starts rather than when this module is imported.
-    uvicorn.run(
-        "llm_simulator.client.api:create_app",
-        factory=True,
-        host=settings.host,
-        port=settings.port,
-    )
+    args = parse_args(argv)
+    # The app is built here rather than by uvicorn, so the flags can reach it
+    # and a broken configuration stops with its message instead of a
+    # traceback from inside the server's startup. Config errors, unreadable
+    # files included, are ValueErrors.
+    try:
+        settings = Settings.from_args(args)
+        app = create_app(settings)
+    except ValueError as exc:
+        print(f"llmsimulator: error: {exc}", file=sys.stderr)
+        return 1
+    uvicorn.run(app, host=settings.host, port=settings.port)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -28,6 +28,18 @@ Python 3.10 or later, with [Poetry](https://python-poetry.org/):
 ```bash
 poetry install -E bench        # -E bench adds the load generator, llmsim-bench
 poetry run llmsimulator         # serves on http://localhost:8080
+poetry run llmsimulator --port 9000 --responses my-responses.yml
+```
+
+## From git, in another project or image
+The package installs straight from the repository, with both commands; `[bench]` adds `llmsim-bench`. Pin a tag or commit for repeatable builds; the command-line flags need a version after 0.1.0. The example configs live in the repository, not in the installed package, so pass your own files:
+
+```dockerfile
+RUN pip install --no-cache-dir \
+    "llm-simulator[bench] @ git+https://github.com/umangaggarwal2/llm-simulator.git@main"
+COPY models.yml responses.yml /app/
+EXPOSE 9000
+CMD ["llmsimulator", "--port", "9000", "--models", "/app/models.yml", "--responses", "/app/responses.yml"]
 ```
 
 ## Running in Docker
@@ -139,17 +151,19 @@ Only `name` and `context_length` are required. The engine decides when tokens ar
 
 The other sections are needed only by the engines that use them; the server refuses to start if a model's engine needs a section the model does not define, or if the file has an unknown key, a duplicate name or an unknown hardware profile.
 
-The server reads its configuration from these environment variables:
+The server reads its configuration from command-line flags and environment variables; a flag takes precedence over its variable. Relative paths resolve against the working directory. `llmsimulator --help` lists the flags, and `--version` prints the version.
 
-| Variable | Default |
-|---|---|
-| `LLM_SIM_MODELS` | `config/models.yml` |
-| `LLM_SIM_RESPONSES` | `config/responses.yml` |
-| `LLM_SIM_HOST` | `0.0.0.0` |
-| `LLM_SIM_PORT` | `8080` |
-| `LLM_SIM_SUMMARY_REQUEST_SAMPLES` | `10000`: requests `/metrics/summary` keeps per-request values for |
-| `LLM_SIM_SUMMARY_TOKEN_SAMPLES` | `100000`: tokens it keeps per-token values (ITL, lag) for |
-| `LLM_SIM_SUMMARY_RATE_SECONDS` | `60`: seconds throughput is averaged over |
+| Flag | Variable | Default |
+|---|---|---|
+| `--models FILE` | `LLM_SIM_MODELS` | `config/models.yml` |
+| `--responses FILE` | `LLM_SIM_RESPONSES` | `config/responses.yml` |
+| `--host HOST` | `LLM_SIM_HOST` | `0.0.0.0` |
+| `--port PORT` | `LLM_SIM_PORT` | `8080` |
+| | `LLM_SIM_SUMMARY_REQUEST_SAMPLES` | `10000`: requests `/metrics/summary` keeps per-request values for |
+| | `LLM_SIM_SUMMARY_TOKEN_SAMPLES` | `100000`: tokens it keeps per-token values (ITL, lag) for |
+| | `LLM_SIM_SUMMARY_RATE_SECONDS` | `60`: seconds throughput is averaged over |
+
+A file that cannot be read or does not validate stops the server before it starts, with a message naming the file and the problem.
 
 # Response Configuration
 
