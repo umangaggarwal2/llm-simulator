@@ -1,6 +1,6 @@
 [project]
 name = "llm-simulator"
-version = "0.1.0"
+version = "0.2.0"
 description = "A GPU-free, deterministic stand-in for an OpenAI-compatible LLM server. Its latency and throughput respond to load the way a real serving engine's do, so the systems built on top of a model can find their own bottlenecks and failure modes without paying for model inference."
 authors = [{name="Umang Aggarwal", email="umangaggarwal2@github.com"}]
 license = "MIT"
