@@ -1,4 +1,7 @@
 # llm-simulator
+[![PyPI](https://img.shields.io/pypi/v/llm-simulator)](https://pypi.org/project/llm-simulator/)
+[![Python 3.10+](https://img.shields.io/pypi/pyversions/llm-simulator)](https://pypi.org/project/llm-simulator/)
+
 A GPU-free, deterministic stand-in for an OpenAI-compatible LLM server. Its latency and throughput respond to load the way a real serving engine's do, so the systems built on top of a model can find their own bottlenecks and failure modes without paying for model inference.
 
 ## What it is for
@@ -22,17 +25,19 @@ The simulator models the resource constraints that drive client-visible latency 
 
 # Installation
 
-## Locally
-Python 3.10 or later, with [Poetry](https://python-poetry.org/):
+## From PyPI
+Python 3.10 or later:
 
 ```bash
-poetry install                 # the server, llmsimulator, and the load generator, llmsim-bench
-poetry run llmsimulator         # serves on http://localhost:8080
-poetry run llmsimulator --port 9000 --responses my-responses.yml
+pip install llm-simulator
+llmsimulator                   # serves on http://localhost:8080
+llmsimulator --port 9000 --responses my-responses.yml
 ```
 
+Both commands, `llmsimulator` and `llmsim-bench`, are installed. The package carries the built-in configs, so a bare `llmsimulator` runs anywhere without extra files.
+
 ## From git, in another project or image
-The package installs straight from the repository, with both commands, `llmsimulator` and `llmsim-bench`. Pin a tag or commit for repeatable builds; the command-line flags and built-in configs need a version after 0.1.0. The installed package carries the example configs, so a bare `llmsimulator` runs anywhere; pass only the files you want to replace:
+To pin a pre-release commit or use unreleased changes, install straight from the repository:
 
 ```dockerfile
 RUN pip install --no-cache-dir \
@@ -42,11 +47,19 @@ EXPOSE 9000
 CMD ["llmsimulator", "--port", "9000", "--responses", "/app/responses.yml"]
 ```
 
+## From source (contributing)
+Python 3.10 or later, with [Poetry](https://python-poetry.org/):
+
+```bash
+poetry install                 # the server, llmsimulator, and the load generator, llmsim-bench
+poetry run llmsimulator         # serves on http://localhost:8080
+```
+
 ## Running in Docker
 `docker/Dockerfile` builds two images: `llm-simulator` (the server) and `llm-simulator-bench` (the load generator). `docker/docker-compose.yml` runs them. Run every command from the repository root.
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d --build     # the simulator on http://localhost:8080
+docker compose -f docker/docker-compose.yml up -d --build      # the simulator on http://localhost:8080
 docker compose -f docker/docker-compose.yml logs -f simulator
 docker compose -f docker/docker-compose.yml --profile '*' down    # everything, including a left-over bench-target
 ```
@@ -235,8 +248,8 @@ A list of values matches if any of them does. Order matters: put specific entrie
 For a controlled output length, start the simulator with the benchmark responses, where every response is long synthetic text, so `--max-tokens` sets the exact number of output tokens:
 
 ```bash
-poetry run llmsimulator --responses builtin:bench-responses
-poetry run llmsim-bench --model qwen-mock --concurrency 8 --requests 100 \
+llmsimulator --responses builtin:bench-responses
+llmsim-bench --model qwen-mock --concurrency 8 --requests 100 \
     --input-tokens 512 --max-tokens 256 --output run.json
 ```
 
@@ -290,7 +303,7 @@ Prompts come from one source per run:
 `--concurrency N` is a closed loop: N requests in flight, each worker sending its next request when its previous one finishes, so a slow server is offered less load and queueing stays hidden. `--rate R` is an open loop: requests arrive at R per second on a seeded Poisson schedule (exponential gaps, the standard model of independent users), whether or not earlier ones have finished. `--max-concurrency N` caps the requests in flight; an arrival that finds every slot busy waits for one.
 
 ```bash
-poetry run llmsim-bench --model qwen-mock --rate 50 --max-concurrency 16 --duration 5 \
+llmsim-bench --model qwen-mock --rate 50 --max-concurrency 16 --duration 5 \
     --input-tokens 512 --max-tokens 64
 ```
 
@@ -312,7 +325,7 @@ Open-loop latency is shown two ways. `TTFT` and `E2E` are measured from when eac
 Giving `--concurrency` or `--rate` several values runs the same benchmark at each, one after another, with the same prompts, and prints one row per level. Each level is a full run: warm-up, server reset, measurement, drain. A level that fails is reported and the sweep continues. `--output` writes every level's full results to one JSON file.
 
 ```bash
-poetry run llmsim-bench --model qwen-mock --rate 10,50,200,400 --duration 5 \
+llmsim-bench --model qwen-mock --rate 10,50,200,400 --duration 5 \
     --input-tokens 512 --max-tokens 64
 ```
 
@@ -378,7 +391,7 @@ Read a sweep for the level where latency breaks away while throughput stops keep
 
 # Status and roadmap
 
-Version 0.1.0. Until 1.0, the formats of `models.yml` and `responses.yml`, the metric names and the `llmsim-bench` options may still change.
+Version 0.2.1. Until 1.0, the formats of `models.yml` and `responses.yml`, the metric names and the `llmsim-bench` options may still change.
 
 ## What works today
 

@@ -19,6 +19,8 @@ classifiers = [
     "Topic :: Software Development :: Testing",
     "Topic :: Software Development :: Testing :: Mocking",
     "Topic :: System :: Benchmark",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "License :: OSI Approved :: MIT License",
 ]
 dependencies = [
     "fastapi>=0.100.0",
