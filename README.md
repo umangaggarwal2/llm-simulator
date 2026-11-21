@@ -391,7 +391,7 @@ Read a sweep for the level where latency breaks away while throughput stops keep
 
 # Status and roadmap
 
-Version 0.2.1. Until 1.0, the formats of `models.yml` and `responses.yml`, the metric names and the `llmsim-bench` options may still change.
+Version 0.2.2. Until 1.0, the formats of `models.yml` and `responses.yml`, the metric names and the `llmsim-bench` options may still change.
 
 ## What works today
 
